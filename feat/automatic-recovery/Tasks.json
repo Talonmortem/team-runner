@@ -1,0 +1,78 @@
+{
+  "track": "automatic-recovery",
+  "kind": "feature",
+  "date": "2026-10-17",
+  "status": "completed",
+  "objective": "Автоматическое техническое восстановление сервисом проекта",
+  "invariants": [
+    "Нет replay неизвестных эффектов",
+    "Явное намерение pause/stop имеет приоритет",
+    "Не запускать acceptance/rework фоновым наблюдением",
+    "До трёх автоматических попыток; дополнительная только по явному ручному разрешению; immutable snapshots",
+    "Не запускать рабочие цели ради проверки"
+  ],
+  "queue": [
+    {
+      "id": "core",
+      "task": "Техническая сверка и очистка",
+      "status": "completed"
+    },
+    {
+      "id": "supervisor",
+      "task": "Журнал, расписание, lifecycle",
+      "status": "completed"
+    },
+    {
+      "id": "controls",
+      "task": "CLI/UI и намерение пользователя",
+      "status": "completed"
+    },
+    {
+      "id": "verification",
+      "task": "Изолированные проверки",
+      "status": "completed"
+    },
+    {
+      "id": "deployment",
+      "task": "Обновление .venv, HTTP и включение SHM",
+      "status": "completed"
+    },
+    {
+      "id": "missing-terminal",
+      "task": "Подтверждение исчезнувших локальных терминалов после перезапуска; остановка SHM",
+      "status": "completed"
+    }
+  ],
+  "verification": [
+    "Full unittest: 248 PASS, 50.990s",
+    "Final recovery-specific run: 25 PASS",
+    "Standalone orca_msg/orca_recover/token_usage: 0 failures",
+    "Workspace thread isolation PASS",
+    "Python AST and node --check PASS",
+    "Installed 0.2.0 sources match repository Python files",
+    "SHM and SmartMonitoring service health API version=0.2.0 running",
+    "UI restarted port 37539, recovery controls served",
+    "SHM observing; unchanged attempt/dispatch, original runner PID 1573113 live; other existing recovery disabled",
+    "257 unittest PASS (47.376s); missing terminals, ownership, unknown effects, coordinator proof, boot identity, PATH, historical stop projection",
+    "0.2.1 wheel/sdist built; installed sources match; SHM HTTP health 0.2.1",
+    "SHM API running=false, stop_status=stopped, health.error=null; complete local terminal list empty",
+    "0.2.2: 28 recovery tests PASS; SHM API shows three-attempt limit after pause, no stale terminal mismatch",
+    "0.2.3: 47 focused tests PASS (extra attempt/recovery/stop refresh/UI CLI/startup); node --check PASS; SHM API extra retry done, attempt=4, running=false, intent=paused"
+  ],
+  "latest_attempt": {
+    "date": "2026-10-17",
+    "result": "0.2.3: одноразовое ручное разрешение сверх лимита через CLI/UI. Счётчик/история сохранены, неизвестные операции и неподтверждённая остановка блокируют повтор. SHM попытка 4 подготовлена с прежним снимком; запуск оставлен пользователю через Продолжить.",
+    "evidence": [
+      "feat/automatic-recovery/evidence/missing-terminal-tests.log",
+      "feat/automatic-recovery/evidence/missing-terminal-deployment.json"
+    ]
+  },
+  "execution_rules": [
+    "Не коммитить и не менять ветку",
+    "Сохранить существующие файлы"
+  ],
+  "panel": {
+    "phase": "completed",
+    "blockers": []
+  }
+}

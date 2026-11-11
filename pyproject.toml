@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "team-runner"
+version = "0.2.3"
+description = "Local multi-project Orca team runner"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+team-runner = "team_runner.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+team_runner = ["*.json", "*.md", "*.sh", "roles/*.md", "templates/*", "runner-ui/*"]

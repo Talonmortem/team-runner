@@ -1,0 +1,62 @@
+{
+  "date": "2026-10-08T14:00:06.092510",
+  "archive": "/home/talonmortem/.local/state/team-runner/archives/shm-20261008-140005",
+  "archive_sha256": "91c32cc24bc387aa925d7006539e3363bbefa933429596fbd954a77a27aba4eb",
+  "project_id": "205b0710-cd16-44c9-adce-0546f351f728",
+  "workspace_id": "2146a50e-8c8c-4a0e-89ee-d68363199260",
+  "identity": {
+    "project_id": "205b0710-cd16-44c9-adce-0546f351f728",
+    "workspace_id": "2146a50e-8c8c-4a0e-89ee-d68363199260",
+    "path": "/home/talonmortem/repo/SHM",
+    "orca_id": "20ec544c-2287-434d-8ace-1708be999ce3::/home/talonmortem/repo/SHM",
+    "orca_instance": "fd06bddc-5e98-46d9-b85a-919a826721ec"
+  },
+  "queue_started": false,
+  "history_authority": [
+    {
+      "dispatch": "ctx_fb9ab14f709f",
+      "status": "completed",
+      "completedAt": "2026-10-07T03:24:08.818Z",
+      "capabilityRevokedAt": "2026-10-07T03:24:08.818Z",
+      "ownership": "user_owned",
+      "release": "retained",
+      "retained_reason": "user_takeover"
+    },
+    {
+      "dispatch": "ctx_1ae1a0fa36ec",
+      "status": "completed",
+      "completedAt": "2026-10-07T19:25:24.889Z",
+      "capabilityRevokedAt": "2026-10-07T19:25:24.889Z",
+      "ownership": "user_owned",
+      "release": "retained",
+      "retained_reason": "user_takeover"
+    },
+    {
+      "dispatch": "ctx_ec556def2932",
+      "status": "completed",
+      "completedAt": "2026-10-08T00:10:07.735Z",
+      "capabilityRevokedAt": "2026-10-08T00:10:07.735Z",
+      "ownership": "user_owned",
+      "release": "retained",
+      "retained_reason": "user_takeover"
+    },
+    {
+      "dispatch": "ctx_d3b1154bdf37",
+      "status": "completed",
+      "completedAt": "2026-10-08T05:46:25.288Z",
+      "capabilityRevokedAt": "2026-10-08T05:46:25.288Z",
+      "ownership": "released",
+      "release": "released",
+      "retained_reason": null
+    },
+    {
+      "dispatch": "ctx_4048ed6cb941",
+      "status": "failed",
+      "completedAt": "2026-10-08T06:22:07.817Z",
+      "capabilityRevokedAt": "2026-10-08T06:22:07.817Z",
+      "ownership": "user_owned",
+      "release": "retained",
+      "retained_reason": "user_takeover"
+    }
+  ]
+}

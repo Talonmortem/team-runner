@@ -1,0 +1,27 @@
+{
+  "date": "2026-10-12",
+  "status": "completed",
+  "objective": "Возврат замечаний приёмки координатору без закрытия сессии",
+  "invariants": [
+    "Только та же попытка и подтверждённая сессия",
+    "Unknown effects не переигрывать",
+    "Не запускать рабочие цели при проверке"
+  ],
+  "queue": [
+    {
+      "id": "rework",
+      "status": "completed",
+      "task": "Ограниченный возврат замечаний и сохранение сессии при блокере"
+    }
+  ],
+  "verification": [
+    "PYTHONPATH=src:tests python3 -m unittest test_acceptance_rework test_session_cleanup test_goal_runner test_runner_recovery: 68 PASS",
+    "PYTHONPATH=src python3 -m unittest discover -s tests -p test_*.py: 96 PASS",
+    "Standalone orca_msg (PYTHONPATH=src), orca_recover, token_usage: PASS"
+  ],
+  "latest_attempt": "2026-10-12: Реализованы два возврата приёмки в той же подтверждённой сессии, сохранение координатора при отказе и точный контракт в задании. Live smoke и рабочие цели не запускались.",
+  "execution_rules": [
+    "Без commit и live smoke"
+  ],
+  "panel_state": "completed"
+}

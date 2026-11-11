@@ -1,0 +1,1 @@
+2026-10-12: Реализация завершена. 12 новых regression tests; 68 целевых и 96 общих unittest PASS. Три standalone helper checks PASS (orca_msg требует PYTHONPATH=src в этом checkout). Live smoke не запускался. Состояние SmartMonitoring не изменялось.

@@ -1,0 +1,3 @@
+2026-10-13: Подготовлен план. Реализация и проверки не завершены.
+2026-10-13: Материалы и mkspec обновлены; 2 теста PASS. Изолированный UI-сценарий PASS. Регрессии запуска/legacy API исправляются.
+2026-10-13: Реализованы два шаблона, v2/reserves, implementer_medium, UI/CLI, резервный запуск, secure CLOUD_API child exec, model variants/reasoningEffort/thinking. Sonnet добавлен в локальную конфигурацию OpenCode без замены остальных записей. 116 тестов PASS, браузер PASS, Python/JS syntax PASS. Ревью: исправлен guard замены reserve→primary и между уровнями. API wire пяти моделей и tool continuation подтверждены локальным API; применение effort облаком не проверялось.

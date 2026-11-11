@@ -1,0 +1,43 @@
+{
+  "track": "coordinator-event-delivery",
+  "kind": "feature",
+  "date": "2026-11-06",
+  "status": "completed",
+  "objective": "Deliver persisted child events through exact Orca Dispatch mailbox and resume SHM without disturbing other projects",
+  "invariants": [
+    "Explicit workspace/attempt/Dispatch; no implicit current or cross-attempt reuse",
+    "No replay of unknown effects; persisted request before send; processing ACK remains separate",
+    "Preserve frozen snapshots and reports; only SHM lifecycle operations",
+    "No commits or branch changes"
+  ],
+  "queue": [
+    {
+      "id": "fix",
+      "task": "Replace terminal input wake with durable Dispatch-addressed notification; reconcile new and legacy receipts",
+      "status": "completed"
+    },
+    {
+      "id": "verify",
+      "task": "Targeted delivery/restart/unknown/ownership/project-isolation regressions and diff review",
+      "status": "completed"
+    },
+    {
+      "id": "resume",
+      "task": "Install only changed modules; restart SHM service only; confirmed stop/retry/resume and verify coordinator",
+      "status": "completed"
+    }
+  ],
+  "verification": [
+    "Events delivered when exact worker is live with unknown or working activity",
+    "Lost/absent receipts never permit a new send; legacy receipt reconciliation preserved",
+    "Foreign owner/incarnation, stopped/paused and other project state isolated"
+  ],
+  "latest_attempt": "b76e4214-cd5a-4d4a-a599-0f943a62c81e",
+  "execution_rules": [
+    "No registered goal launches as tests; SHM resume explicitly requested by user"
+  ],
+  "panel": {
+    "phase": "completed",
+    "blockers": []
+  }
+}

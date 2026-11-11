@@ -1,0 +1,113 @@
+{
+  "version": 2,
+  "auto_continue_after_replan": false,
+  "roles": {
+    "coordinator": {
+      "agent": "claude",
+      "profile": "",
+      "provider": "current",
+      "model": "claude-opus-5-5",
+      "effort": "high"
+    },
+    "planner": {
+      "agent": "codex",
+      "profile": "",
+      "provider": "codex-lb",
+      "model": "gpt-6.1-sol",
+      "effort": "high"
+    },
+    "explorer": {
+      "agent": "codex",
+      "profile": "",
+      "provider": "codex-lb",
+      "model": "gpt-6-luna",
+      "effort": "xhigh"
+    },
+    "implementer_standard": {
+      "agent": "codex",
+      "profile": "",
+      "provider": "codex-lb",
+      "model": "gpt-6-luna",
+      "effort": "xhigh"
+    },
+    "implementer_complex": {
+      "agent": "codex",
+      "profile": "",
+      "provider": "codex-lb",
+      "model": "gpt-6.1-sol",
+      "effort": "high"
+    },
+    "tester": {
+      "agent": "codex",
+      "profile": "",
+      "provider": "codex-lb",
+      "model": "gpt-6-luna",
+      "effort": "xhigh"
+    },
+    "final_reviewer": {
+      "agent": "codex",
+      "profile": "",
+      "provider": "codex-lb",
+      "model": "gpt-6.1-sol",
+      "effort": "high"
+    },
+    "escalation": {
+      "agent": "codex",
+      "profile": "",
+      "provider": "codex-lb",
+      "model": "gpt-6.1-sol",
+      "effort": "high"
+    },
+    "completion_checker": {
+      "agent": "codex",
+      "profile": "",
+      "provider": "codex-lb",
+      "model": "gpt-6-luna",
+      "effort": "xhigh"
+    },
+    "tester_complex": {
+      "agent": "codex",
+      "profile": "",
+      "provider": "codex-lb",
+      "model": "gpt-6.1-sol",
+      "effort": "high"
+    },
+    "final_reviewer_critical": {
+      "agent": "claude",
+      "profile": "",
+      "provider": "current",
+      "model": "claude-opus-5-5",
+      "effort": "high"
+    },
+    "escalation_expert": {
+      "agent": "claude",
+      "profile": "",
+      "provider": "current",
+      "model": "claude-opus-5-5",
+      "effort": "high"
+    },
+    "implementer_medium": {
+      "agent": "codex",
+      "profile": "",
+      "provider": "codex-lb",
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh"
+    }
+  },
+  "template": "current",
+  "reserves": {
+    "coordinator": null,
+    "planner": null,
+    "explorer": null,
+    "implementer_standard": null,
+    "implementer_complex": null,
+    "tester": null,
+    "final_reviewer": null,
+    "escalation": null,
+    "completion_checker": null,
+    "tester_complex": null,
+    "final_reviewer_critical": null,
+    "escalation_expert": null,
+    "implementer_medium": null
+  }
+}

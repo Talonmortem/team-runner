@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "request_id": "00000000-0000-4000-8000-000000000001",
+  "action": "pause",
+  "scope": {
+    "identity": "<workspace identity>",
+    "generation": null,
+    "attempt": null,
+    "revision": "<opaque revision>"
+  },
+  "payload": {}
+}

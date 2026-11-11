@@ -1,0 +1,61 @@
+{
+  "track": "feat-contracts",
+  "kind": "feature",
+  "date": "2026-10-17",
+  "status": "not_started",
+  "objective": "Общий контракт управления",
+  "stopping_condition": "Все пункты этапа реализованы и приняты по критериям feat-contracts.md; доказательства записаны; общие инварианты root соблюдены.",
+  "invariants": [
+    "Python 3.11+, stdlib, без новых runtime-зависимостей и frontend-фреймворков.",
+    "Явные project/workspace/checkout и identity; без global current, implicit Orca current и общих mailbox.",
+    "Immutable attempt snapshots до dispatch; без cross-attempt reuse и переписывания истории.",
+    "Неизвестный внешний эффект не повторять автоматически: сначала доказательства, иначе needs_action.",
+    "Пауза и остановка имеют приоритет перед запуском/восстановлением; устаревшая команда не действует на новую попытку.",
+    "Техническое восстановление не принимает работу и не запускает acceptance/rework; решения приёмки остаются у runner.",
+    "Не расширять workflow permissions, не отвечать за пользователя, не повышать лимиты попыток автоматически.",
+    "Не коммитить, не менять ветки, не запускать зарегистрированные рабочие цели как тест; live smoke только по отдельному разрешению.",
+    "Существующие изменения, старые попытки и завершённые треки сохранять."
+  ],
+  "depends_on": [],
+  "queue": [
+    {
+      "id": "application",
+      "task": "Выделить общий прикладной слой команд и представлений состояния",
+      "status": "not_started",
+      "depends_on": []
+    },
+    {
+      "id": "protocol",
+      "task": "Определить версионированный контракт статуса, ошибок и операций",
+      "status": "not_started",
+      "depends_on": [
+        "application"
+      ]
+    },
+    {
+      "id": "compatibility",
+      "task": "Проверить совместимость CLI/HTTP, старых записей и попыток",
+      "status": "not_started",
+      "depends_on": [
+        "protocol"
+      ]
+    }
+  ],
+  "verification": {
+    "status": "not_started",
+    "evidence": []
+  },
+  "latest_attempt": {
+    "date": "2026-10-17",
+    "result": "Подготовлен только план; реализация и проверки не начаты."
+  },
+  "execution_rules": [
+    "Сначала прочитать ../goal-autonomous-runner.md.",
+    "Выполнять только после явной активации/разрешения исполнения.",
+    "Не запускать реальные цели как тест."
+  ],
+  "panel": {
+    "phase": "prepared",
+    "blockers": []
+  }
+}

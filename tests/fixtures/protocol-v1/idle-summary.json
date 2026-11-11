@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "identity": "<workspace identity>",
+  "revision": "<opaque revision>",
+  "generation": null,
+  "goal": null,
+  "desired_state": "paused",
+  "observed_state": "paused",
+  "confirmed": true,
+  "current": {
+    "item": null,
+    "attempt": null
+  },
+  "progress": {
+    "total": 0,
+    "completed": 0,
+    "missing_features": [],
+    "incomplete_features": []
+  },
+  "final_acceptance": {
+    "status": "not_verified",
+    "attempt": null
+  },
+  "blocker": null,
+  "available_actions": [
+    {
+      "action": "start"
+    }
+  ],
+  "recovery": {
+    "enabled": false,
+    "status": "observing",
+    "next_check": null
+  },
+  "compatibility": "legacy",
+  "epoch": null
+}

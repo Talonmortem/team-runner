@@ -1,0 +1,307 @@
+[
+  {
+    "source": "/home/talonmortem/repo/SHM/team/runner_config.py",
+    "relative": "runner_config.py",
+    "sha256": "761dceb0d8f09f511428b887fa262f6fd445a5f3f7472339bb8c11ef329ccb84",
+    "destination": "src/team_runner/runner_config.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/orca-mailbox.sh",
+    "relative": "orca-mailbox.sh",
+    "sha256": "cb527410930df79c4ec2e151fb07b007f63441ba57b918e564a1702b515e6000",
+    "disposition": "superseded by scoped CLI and Launcher; exact original in archive"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/orca_recover.py",
+    "relative": "orca_recover.py",
+    "sha256": "c262ed0815b3c1e2ecc54104884479d9140f7d920fdd143b16ecd9646577f19d",
+    "destination": "src/team_runner/orca_recover.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/orca-codex-monitor.sh",
+    "relative": "orca-codex-monitor.sh",
+    "sha256": "6b2c01a669dd0978dcf34d88edb2dda9a50c1ab0f6bad1e9843b8841284398dd",
+    "disposition": "superseded by scoped CLI and Launcher; exact original in archive"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/roles-and-rules.md",
+    "relative": "roles-and-rules.md",
+    "sha256": "ad132cbe70011c124a0f86c66dcbecefec12724e41665edf9d322a1b3f578658",
+    "destination": "src/team_runner/roles-and-rules.md"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/runner_entry.py",
+    "relative": "runner_entry.py",
+    "sha256": "a23c28d3a24128d5c1592f41f2895a14fb6d438d1218f24ddd7ced9133d8870f",
+    "destination": "src/team_runner/runner_entry.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/runner-defaults.json",
+    "relative": "runner-defaults.json",
+    "sha256": "452b8f63d4dea9d76e7680f5355483af758aa01f11d8b16428c1b962b76342e3",
+    "destination": "src/team_runner/runner-defaults.json"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/GOAL_MASTER.md",
+    "relative": "GOAL_MASTER.md",
+    "sha256": "1b2983f7e6dc6538ba29d1481ba2194ab43834ff8e4ba73c44122af1cfa60fb3",
+    "destination": "src/team_runner/GOAL_MASTER.md"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/POLICY.md",
+    "relative": "POLICY.md",
+    "sha256": "4bb81dda99fbd248326ad7455ae52303d43d5247c76010124509734462a35460",
+    "destination": "src/team_runner/POLICY.md"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/run_logged.py",
+    "relative": "run_logged.py",
+    "sha256": "d67f1eaf272af063925df082b6301b6b52f9aaa17cbf1cf34baca66d4e44cbe8",
+    "destination": "src/team_runner/run_logged.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/goal-runner.md",
+    "relative": "goal-runner.md",
+    "sha256": "6bbb691a27f7ed042b427497169d37faa29eacca45de3fa2475ccbfe1c7fcb58",
+    "destination": "src/team_runner/goal-runner.md"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/GOAL_PROMPT.md",
+    "relative": "GOAL_PROMPT.md",
+    "sha256": "1f1713ccd9a4a93601c4b4559a28f916d705ebe90bbd6d9462469805dbe4aa5a",
+    "destination": "src/team_runner/GOAL_PROMPT.md"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/runner_operations.py",
+    "relative": "runner_operations.py",
+    "sha256": "758896a5c02f78740b45e2e8cf822c464ba3ffb5f3de019c39cb67b632665941",
+    "destination": "src/team_runner/runner_operations.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/orca_msg.py",
+    "relative": "orca_msg.py",
+    "sha256": "37c26b2359750b6b0f4409d818d3242d178cbf841d808310c29554fb355187a2",
+    "destination": "src/team_runner/orca_msg.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/orca_chk.py",
+    "relative": "orca_chk.py",
+    "sha256": "2d69b02f1343913eea7bb3aa0c58387e4a54d0d87bdd55c0b12feb1919f32545",
+    "destination": "src/team_runner/orca_chk.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/runner_launch.py",
+    "relative": "runner_launch.py",
+    "sha256": "836f828cfa64620aa3536fd04b727faa843286e1885a839b3cbc4cdde9cad6f2",
+    "destination": "src/team_runner/runner_launch.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/orca-codex-reuse.sh",
+    "relative": "orca-codex-reuse.sh",
+    "sha256": "02ff1ee6ac4ffd896da2d2276098eb0796ff3b69578cb7763e8902bb0b47ba71",
+    "disposition": "superseded by scoped CLI and Launcher; exact original in archive"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/orca-codex-launch.sh",
+    "relative": "orca-codex-launch.sh",
+    "sha256": "b95a9f5b5d3813d6b42a8f1b670d09861adf20deb9807dc25d3dad8dfbf87737",
+    "disposition": "superseded by scoped CLI and Launcher; exact original in archive"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/.gitignore",
+    "relative": ".gitignore",
+    "sha256": "862263fa1f46c20f0d1e4dac5ffcc75abd55c08211b2c3864c5f8764b9d87793",
+    "disposition": "retained in SHM: repository ignore rules"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/runner_store.py",
+    "relative": "runner_store.py",
+    "sha256": "46bb75716d0433ef3e51a8941f2ad48d43744e32fa11f39de57dbeff8328a613",
+    "destination": "src/team_runner/runner_store.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/defect-classes.md",
+    "relative": "defect-classes.md",
+    "sha256": "f8384b4c898763c45ce1a8969ee65631e8aa63656cf720f0ace4907a5ecd93ed",
+    "disposition": "project business rules retained in SHM; platform has generic categories"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/token-usage.py",
+    "relative": "token-usage.py",
+    "sha256": "ef073f4ac4ac13918ed23cbe2de045e5feaecc041f133e1f500366ca3f8a428d",
+    "destination": "src/team_runner/token-usage.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/MODELS.md",
+    "relative": "MODELS.md",
+    "sha256": "b13de816e3e1de0d39492a1a36a294fddc892455ee7223274d6268c2582f2ad9",
+    "destination": "src/team_runner/MODELS.md"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/runner_ui.py",
+    "relative": "runner_ui.py",
+    "sha256": "c8a2ba9bc6b18d3e8b62bb8b7c1cc978f76eb2b0f50d34c928941967a9446e4d",
+    "destination": "src/team_runner/runner_ui.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/worker-brief.md",
+    "relative": "worker-brief.md",
+    "sha256": "bc11522f8cb8857befd18dae42f2ab92a722601290fea9e45fca02166bfbf785",
+    "destination": "src/team_runner/worker-brief.md"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/goal-runner.py",
+    "relative": "goal-runner.py",
+    "sha256": "4a11a67d28c56a880973346634da7a6ee1899bc374175178b8daf0576c8edca8",
+    "destination": [
+      "src/team_runner/engine.py",
+      "src/team_runner/cli.py",
+      "src/team_runner/tracking.py",
+      "src/team_runner/service.py"
+    ]
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/runner-ui/index.html",
+    "relative": "runner-ui/index.html",
+    "sha256": "e41aa8c022e9fb0c9c0a5846c3ad31c492947459dfb7cc5f36bafc375f7b540e",
+    "destination": "src/team_runner/runner-ui/index.html"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/runner-ui/style.css",
+    "relative": "runner-ui/style.css",
+    "sha256": "dc349a58921579993ec1c3c5ab02e1a586bfe04f489aa9c0e1d1c1ce3f29269c",
+    "destination": "src/team_runner/runner-ui/style.css"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/runner-ui/app.js",
+    "relative": "runner-ui/app.js",
+    "sha256": "3d1ad7ef7c868de8ca8cfaebd3ce96b049f2ccc316897012cc9923b891aa1117",
+    "destination": "src/team_runner/runner-ui/app.js"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/templates/tester-gates.md",
+    "relative": "templates/tester-gates.md",
+    "sha256": "2c71406095bd4396a85f0f206f572046cb5378737e77f5981149837b1d88321c",
+    "destination": "src/team_runner/templates/tester-gates.md"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/templates/reviewer.md",
+    "relative": "templates/reviewer.md",
+    "sha256": "284041fcc126e6a82937d7a678f0418e0d3a3afbbbea1febfb5ce600c22a9a7b",
+    "destination": "src/team_runner/templates/reviewer.md"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/templates/mkspec.py",
+    "relative": "templates/mkspec.py",
+    "sha256": "fcd37642ca6e3ee6f7a9bc961a442f2dbb36fecf0aa07200b8608c86e46ede1c",
+    "destination": "src/team_runner/templates/mkspec.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/templates/tester-checks.md",
+    "relative": "templates/tester-checks.md",
+    "sha256": "f22ef4d203a7effac45ccdf84bc7578f14086209dc1d02d046d20b0d541f890e",
+    "destination": "src/team_runner/templates/tester-checks.md"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/templates/impl-step.md",
+    "relative": "templates/impl-step.md",
+    "sha256": "3ddd8fb3358288397ec7f46824a7fdc7dca6668834a1f42fa8f3a4776064a253",
+    "destination": "src/team_runner/templates/impl-step.md"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/roles/supervisor.md",
+    "relative": "roles/supervisor.md",
+    "sha256": "753faadc9bb866c9843a90e872defb6c391e0e662ffe0122dc0c833aefaba282",
+    "destination": "src/team_runner/roles/supervisor.md"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/roles/planner.md",
+    "relative": "roles/planner.md",
+    "sha256": "98e212294dcc273839f719ed2a12e85a0e783773ad704f94fe20828cc2636701",
+    "destination": "src/team_runner/roles/planner.md"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/roles/openai_tester.md",
+    "relative": "roles/openai_tester.md",
+    "sha256": "bf87a76c15d58cc82e31f1e6740469680918dbe886d1ab56d423b4153d955fee",
+    "destination": "src/team_runner/roles/openai_tester.md"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/roles/openai_implementer.md",
+    "relative": "roles/openai_implementer.md",
+    "sha256": "eb3eb6aadae19473df8a04da99d53a56af1dd5d7f53ffd82c5325ce4acbfa515",
+    "destination": "src/team_runner/roles/openai_implementer.md"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/roles/openai_explorer.md",
+    "relative": "roles/openai_explorer.md",
+    "sha256": "eac7bfecec674e54cb4274085f03d1a6d5d84b8f563d0fbd6552210b3836503b",
+    "destination": "src/team_runner/roles/openai_explorer.md"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/roles/final_reviewer.md",
+    "relative": "roles/final_reviewer.md",
+    "sha256": "784fc1b045e5dc148207196e06672b12a03ce4132855569418be54e0504779d3",
+    "destination": "src/team_runner/roles/final_reviewer.md"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/tests/test_run_logged.py",
+    "relative": "tests/test_run_logged.py",
+    "sha256": "b77c9c1614ea841292fc43401d1db27d6b8ea9bbcce770354cb4c4925984a9c3",
+    "destination": "tests/test_run_logged.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/tests/test_goal_runner.py",
+    "relative": "tests/test_goal_runner.py",
+    "sha256": "d68bc66123abc610318e034a3b6ae3607e9f6f4e61c47a4b1d613975a3d97dd6",
+    "destination": "tests/test_goal_runner.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/tests/runner_browser_fixture.py",
+    "relative": "tests/runner_browser_fixture.py",
+    "sha256": "2584b6eb7cf8abd59d790d08ddf4be98395649fe04d936ecc6dbec99b0df3917",
+    "destination": "tests/runner_browser_fixture.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/tests/runner_browser_check.py",
+    "relative": "tests/runner_browser_check.py",
+    "sha256": "cf108f55e85da2d902f824b0b737a74d26d08d9932179de0f8b7dd494c40ab72",
+    "destination": "tests/runner_browser_check.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/tests/runner_live_smoke.py",
+    "relative": "tests/runner_live_smoke.py",
+    "sha256": "92bb7a52fb53cd9b961a3b668889eaff9e645292d033c4c0e13755cf21fbd31e",
+    "destination": "tests/runner_live_smoke.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/tests/test_runner_recovery.py",
+    "relative": "tests/test_runner_recovery.py",
+    "sha256": "ec39caaae4581196ab0e3ab9f1b59690c09f5c945262a557435d180c6796848b",
+    "destination": "tests/test_runner_recovery.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/tests/test_token_usage.py",
+    "relative": "tests/test_token_usage.py",
+    "sha256": "1ec563fbae70ded10ac83aef6cdcdf56bf6c30a3c1be8931d5d340092ba6d839",
+    "destination": "tests/test_token_usage.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/tests/test_orca_recover.py",
+    "relative": "tests/test_orca_recover.py",
+    "sha256": "226143843fa037d4591db006f3bb51320b70acc508a4aa47e0f475ebf2c3ee22",
+    "destination": "tests/test_orca_recover.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/tests/test_orca_msg.py",
+    "relative": "tests/test_orca_msg.py",
+    "sha256": "c392552a448e7d14cb28f7e7ee75d2efbe68d669f7a5c0253f76923404d3ab15",
+    "destination": "tests/test_orca_msg.py"
+  },
+  {
+    "source": "/home/talonmortem/repo/SHM/team/tests/test_orca_chk.py",
+    "relative": "tests/test_orca_chk.py",
+    "sha256": "bb0ac7abbd5b61b4222a93634680deabfb6da1f84f112f2977d94f57536beda8",
+    "destination": "tests/test_orca_chk.py"
+  }
+]

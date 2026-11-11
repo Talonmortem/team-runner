@@ -1,0 +1,78 @@
+{
+  "track": "team-runner-extraction",
+  "kind": "feature",
+  "date": "2026-10-08",
+  "status": "completed",
+  "objective": "Отдельная локальная платформа team-runner; SHM подключён без запуска очереди",
+  "invariants": [
+    "Сохранять незакоммиченные изменения",
+    "Не менять backend/frontend и sber",
+    "Один runner на канонический checkout",
+    "Unknown блокирует переключение",
+    "Без коммитов и смены веток"
+  ],
+  "queue": [
+    {
+      "id": "baseline",
+      "status": "completed",
+      "task": "Регрессии, Claude smoke, перечень и проверка копий"
+    },
+    {
+      "id": "platform",
+      "status": "completed",
+      "task": "Пакет, каталог, контекст, изоляция, снимки, CLI/UI"
+    },
+    {
+      "id": "verification",
+      "status": "completed",
+      "task": "Регрессии, fixtures, браузер, live smoke, Go/build"
+    },
+    {
+      "id": "cutover",
+      "status": "completed",
+      "task": "Проверка попыток, архив, регистрация SHM, удаление дублей"
+    }
+  ],
+  "verification": [
+    "Baseline: 45 runner/recovery regressions PASS; existing helper scripts PASS",
+    "New repository: 53 unittest cases PASS (configuration, HTTP, crash, reconcile, reuse, isolation, archive, CLI)",
+    "Standalone orca_chk/orca_msg/orca_recover/run_logged/token-usage regressions PASS",
+    "Final two-project browser lifecycle PASS: concurrent runs, profile/settings isolation, question, gate, pause/resume, independent restarts, stop/retry, unknown recovery, disable",
+    "Installed CLI/HTTP/browser on registered SHM: nine roles, idle state, empty history/current PASS",
+    "Final Codex smoke: ctx_72e72b51b3d5 -> ctx_e251e873d9f9; measured context 4%; same terminal; cleanup confirmed",
+    "Final Claude smoke: ctx_a843b72ef22a -> ctx_8aaa8a90fff4; /context 4%; same terminal; cleanup confirmed",
+    "SHM go test ./... PASS",
+    "SHM npm run build PASS (existing large-bundle warning)",
+    "Archive SHA256/read-only permissions and no duplicate shared Python implementation PASS",
+    "git diff --check PASS"
+  ],
+  "latest_attempt": {
+    "date": "2026-10-08",
+    "result": "Платформа установлена; SHM зарегистрирован без запуска; read-only архив проверен; 48 дублей удалены; обязательные проверки пройдены"
+  },
+  "execution_rules": [
+    "Рабочую очередь не запускать",
+    "Старое состояние не импортировать"
+  ],
+  "panel": {
+    "phase": "completed",
+    "blockers": []
+  },
+  "maintenance_2026_10_09": {
+    "status": "completed",
+    "changes": [
+      "Дочерние сессии закрываются после принятого worker_done; --keep-session оставляет только явно запланированный reuse.",
+      "Координатор освобождается и при отказе приёмки; явно остановленный и подтверждённо закрытый child не блокирует cleanup.",
+      "Таймаут чтения mailbox повторяет чтение без повторного запуска агентов и replay мутаций.",
+      "Mailbox передаётся следующему координатору; consumer_fenced до worker-start фиксируется как отклонённый запуск, без автоматического повтора."
+    ],
+    "verification": [
+      "65 offline unittest tests PASS",
+      "8 accumulated child sessions closed; 4 exited runner shells closed",
+      "W1-1 accepted and coordinator/mailbox closed; queue resumed at W1-2"
+    ],
+    "remaining": [
+      "Запуск W1-2 проверяется отдельно; выполнение всего goal продолжается."
+    ]
+  }
+}

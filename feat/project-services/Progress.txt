@@ -1,0 +1,3 @@
+2026-10-12: План создан; прочитаны каталог, CLI, HTTP/UI, persistence и browser fixture. Реализация не начата.
+2026-10-12: Реализованы service lifecycle/journal, port, CLI/API/proxy и карточки UI. 80 unittest и изолированный browser lifecycle PASS. Финальный review и дополнительные drain/stale-response проверки в работе.
+2026-10-12: Финальная проверка завершена: 84 unittest (включая 16 service), три standalone helper suites, node --check и browser fixture PASS. Проверены graceful drain, CLI lifecycle, same-project checkouts и delayed foreign response. README обновлён; трек completed. Рабочие цели/live smoke не запускались, коммитов нет.

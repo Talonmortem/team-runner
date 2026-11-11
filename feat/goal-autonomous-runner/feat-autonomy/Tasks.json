@@ -1,0 +1,71 @@
+{
+  "track": "feat-autonomy",
+  "kind": "feature",
+  "date": "2026-10-17",
+  "status": "not_started",
+  "objective": "Автономное выполнение и восстановление",
+  "stopping_condition": "Все пункты этапа реализованы и приняты по критериям feat-autonomy.md; доказательства записаны; общие инварианты root соблюдены.",
+  "invariants": [
+    "Python 3.11+, stdlib, без новых runtime-зависимостей и frontend-фреймворков.",
+    "Явные project/workspace/checkout и identity; без global current, implicit Orca current и общих mailbox.",
+    "Immutable attempt snapshots до dispatch; без cross-attempt reuse и переписывания истории.",
+    "Неизвестный внешний эффект не повторять автоматически: сначала доказательства, иначе needs_action.",
+    "Пауза и остановка имеют приоритет перед запуском/восстановлением; устаревшая команда не действует на новую попытку.",
+    "Техническое восстановление не принимает работу и не запускает acceptance/rework; решения приёмки остаются у runner.",
+    "Не расширять workflow permissions, не отвечать за пользователя, не повышать лимиты попыток автоматически.",
+    "Не коммитить, не менять ветки, не запускать зарегистрированные рабочие цели как тест; live smoke только по отдельному разрешению.",
+    "Существующие изменения, старые попытки и завершённые треки сохранять."
+  ],
+  "depends_on": [
+    "contracts"
+  ],
+  "queue": [
+    {
+      "id": "intent",
+      "task": "Сохранить разрешение, политику и состояние цели до запуска эффектов",
+      "status": "not_started",
+      "depends_on": []
+    },
+    {
+      "id": "execute",
+      "task": "Реализовать единый запуск с обеспечением сервиса и supervisor",
+      "status": "not_started",
+      "depends_on": [
+        "intent"
+      ]
+    },
+    {
+      "id": "recovery",
+      "task": "Покрыть сбои до первой попытки, между пунктами и перезапуск сервиса",
+      "status": "not_started",
+      "depends_on": [
+        "execute"
+      ]
+    },
+    {
+      "id": "boundaries",
+      "task": "Проверить pause/stop, лимиты и запрет replay на границах эффектов",
+      "status": "not_started",
+      "depends_on": [
+        "recovery"
+      ]
+    }
+  ],
+  "verification": {
+    "status": "not_started",
+    "evidence": []
+  },
+  "latest_attempt": {
+    "date": "2026-10-17",
+    "result": "Подготовлен только план; реализация и проверки не начаты."
+  },
+  "execution_rules": [
+    "Сначала прочитать ../goal-autonomous-runner.md.",
+    "Выполнять только после явной активации/разрешения исполнения.",
+    "Не запускать реальные цели как тест."
+  ],
+  "panel": {
+    "phase": "prepared",
+    "blockers": []
+  }
+}

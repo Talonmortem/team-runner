@@ -1,0 +1,10 @@
+{
+  "code": "unknown_effect",
+  "message": "Inspect and reconcile the unconfirmed effect",
+  "facts": {
+    "control_request_id": "lost-request"
+  },
+  "actions": [
+    "reconcile"
+  ]
+}

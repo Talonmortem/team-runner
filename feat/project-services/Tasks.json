@@ -1,0 +1,60 @@
+{
+  "track": "project-services",
+  "kind": "feature",
+  "date": "2026-10-12",
+  "status": "completed",
+  "objective": "Независимые сервисы проектов под одним управляющим UI",
+  "invariants": [
+    "Явный запуск; без автоматического replay неизвестных эффектов",
+    "Сервис не останавливает runner; workspace/checkout isolation сохраняется",
+    "Секреты только в закрытом namespace; browser получает только UI token",
+    "Без live smoke, рабочих целей, коммитов и смены веток"
+  ],
+  "queue": [
+    {
+      "id": "services",
+      "task": "Каталог, CLI, процессы, journal и authenticated identity",
+      "status": "completed"
+    },
+    {
+      "id": "http-ui",
+      "task": "Маршрутизация, карточки и сохранение выбора/ответов",
+      "status": "completed"
+    },
+    {
+      "id": "verification",
+      "task": "Изолированные service/HTTP/browser проверки и регрессии",
+      "status": "completed"
+    },
+    {
+      "id": "docs",
+      "task": "README и фактические результаты",
+      "status": "completed"
+    }
+  ],
+  "verification": [
+    "16 isolated service tests PASS: concurrent start/UUID, fixed ports, lifecycle CLI, process identity, secrets, crash/timeout/lost responses, no replay, same-project checkouts, graceful drain",
+    "84 unittest regressions PASS; final run 13.783s",
+    "Standalone test_orca_msg.py, test_orca_recover.py, test_token_usage.py PASS",
+    "Two-project browser fixture PASS: separate ports, task controls, draft retention, delayed foreign response, service stop/start/restart, UI restart, runner continuity, existing unknown recovery",
+    "node --check src/team_runner/runner-ui/app.js PASS",
+    "Tracking JSON parsed; files and acceptance checked; git diff --check PASS (repository files remain untracked)"
+  ],
+  "latest_attempt": {
+    "date": "2026-10-12",
+    "result": "Все критерии изолированной приёмки выполнены; README обновлён. Рабочие цели и live smoke не запускались.",
+    "evidence": [
+      "feat/project-services/evidence/browser-result.json",
+      "feat/project-services/evidence/team-runner.png",
+      "feat/project-services/evidence/unittest.log"
+    ]
+  },
+  "execution_rules": [
+    "Только временные fixture проекты",
+    "Unknown требует reconcile, без повторного POST"
+  ],
+  "panel": {
+    "phase": "completed",
+    "blockers": []
+  }
+}

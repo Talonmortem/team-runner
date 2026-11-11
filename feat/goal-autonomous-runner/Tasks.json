@@ -1,0 +1,88 @@
+{
+  "track": "goal-autonomous-runner",
+  "kind": "goal",
+  "date": "2026-10-17",
+  "status": "not_started",
+  "objective": "После одного явного запуска Team Runner автономно доводит разрешённую цель до проверенного завершения либо конкретной блокировки; человек и внешний агент используют одинаковый контракт, UI показывает только необходимые действия.",
+  "stopping_condition": "Все пять этапов приняты: изолированный CLI/UI запуск требует одного действия; очередь и финальная приёмка завершаются; сбои до/между/во время попыток и перезапуск сервиса не дают дублей; pause/stop и unknown соблюдены; агент получает стабильный JSON и результат по ID; UI проверен на desktop/mobile/клавиатуре; документация и доказательства соответствуют реализации.",
+  "invariants": [
+    "Python 3.11+, stdlib, без новых runtime-зависимостей и frontend-фреймворков.",
+    "Явные project/workspace/checkout и identity; без global current, implicit Orca current и общих mailbox.",
+    "Immutable attempt snapshots до dispatch; без cross-attempt reuse и переписывания истории.",
+    "Неизвестный внешний эффект не повторять автоматически: сначала доказательства, иначе needs_action.",
+    "Пауза и остановка имеют приоритет перед запуском/восстановлением; устаревшая команда не действует на новую попытку.",
+    "Техническое восстановление не принимает работу и не запускает acceptance/rework; решения приёмки остаются у runner.",
+    "Не расширять workflow permissions, не отвечать за пользователя, не повышать лимиты попыток автоматически.",
+    "Не коммитить, не менять ветки, не запускать зарегистрированные рабочие цели как тест; live smoke только по отдельному разрешению.",
+    "Существующие изменения, старые попытки и завершённые треки сохранять."
+  ],
+  "queue": [
+    {
+      "id": "contracts",
+      "path": "feat-contracts",
+      "task": "Общий контракт управления",
+      "status": "not_started",
+      "depends_on": []
+    },
+    {
+      "id": "autonomy",
+      "path": "feat-autonomy",
+      "task": "Автономное выполнение и восстановление",
+      "status": "not_started",
+      "depends_on": [
+        "contracts"
+      ]
+    },
+    {
+      "id": "agent-interface",
+      "path": "feat-agent-interface",
+      "task": "Интерфейс для управляющих агентов",
+      "status": "not_started",
+      "depends_on": [
+        "contracts",
+        "autonomy"
+      ]
+    },
+    {
+      "id": "ui",
+      "path": "feat-ui",
+      "task": "Понятный UI цели и команды",
+      "status": "not_started",
+      "depends_on": [
+        "contracts",
+        "autonomy",
+        "agent-interface"
+      ]
+    },
+    {
+      "id": "acceptance",
+      "path": "feat-acceptance",
+      "task": "Интеграционная приёмка и документация",
+      "status": "not_started",
+      "depends_on": [
+        "contracts",
+        "autonomy",
+        "agent-interface",
+        "ui"
+      ]
+    }
+  ],
+  "verification": {
+    "status": "not_started",
+    "evidence": []
+  },
+  "latest_attempt": {
+    "date": "2026-10-17",
+    "result": "Только подготовка goal по запросу пользователя; исполнение не активировано."
+  },
+  "execution_rules": [
+    "Соблюдать последовательность depends_on и вложенные Tasks.json.",
+    "Запрос текущей сессии разрешает только подготовку.",
+    "Не запускать goal через Team Runner или create_goal при подготовке.",
+    "Не модифицировать исторические треки."
+  ],
+  "panel": {
+    "phase": "prepared",
+    "blockers": []
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "track": "opencode2-cloudru",
+  "kind": "feature",
+  "date": "2026-10-13",
+  "status": "completed",
+  "objective": "OpenCode 2 и модели Cloud.ru только для checkout внутри ~/repo/sber",
+  "invariants": [
+    "Canonical checkout restriction at configuration and dispatch",
+    "Immutable attempt snapshots; no secrets in catalog/snapshots",
+    "No live smoke, working goals, commits or branch changes"
+  ],
+  "queue": [
+    {
+      "id": "config-policy",
+      "status": "completed"
+    },
+    {
+      "id": "launch-ui",
+      "status": "completed"
+    },
+    {
+      "id": "verification-docs",
+      "status": "completed"
+    }
+  ],
+  "verification": [
+    "16 isolated OpenCode config/launch/HTTP tests PASS (0.864s)",
+    "35 goal_runner regression tests PASS",
+    "8 platform isolation tests PASS",
+    "Offline Node DOM harness: allowed/outside workspace and switch-back PASS",
+    "node --check PASS",
+    "Independent review: no BLOCKER/HIGH; arbitrary credential environment fingerprint finding fixed and regression-tested",
+    "No live agents, model calls or registered goals launched"
+  ],
+  "latest_attempt": {
+    "date": "2026-10-13",
+    "result": "Implemented and isolated acceptance passed; live runtime/model integration remains untested"
+  },
+  "execution_rules": [
+    "Offline isolated fixtures only"
+  ],
+  "panel": {
+    "phase": "completed",
+    "blockers": []
+  }
+}

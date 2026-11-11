@@ -1,0 +1,26 @@
+{
+  "date": "2026-10-21",
+  "status": "completed",
+  "objective": "Настройка автоматического продолжения исправлений после экспертного отказа",
+  "invariants": [
+    "Не менять существующие snapshots",
+    "Не обходить приёмку, permissions и unknown effects",
+    "Не запускать рабочие цели"
+  ],
+  "queue": [
+    {
+      "id": "replan",
+      "status": "completed",
+      "task": "Checkbox, сохранение настройки, инструкции координатора и offline проверки"
+    }
+  ],
+  "verification": [
+    "PYTHONPATH=src:tests python3 -m unittest test_config_templates test_template_ui_cli test_goal_runner: 46 PASS",
+    "node --check src/team_runner/runner-ui/app.js: PASS"
+  ],
+  "latest_attempt": "2026-10-21: Добавлены checkbox, boolean config с default=false, инструкции координатора и эксперта; API/reload/legacy/snapshot isolation проверены. Рабочие цели и live smoke не запускались.",
+  "execution_rules": [
+    "Без commit и live smoke"
+  ],
+  "panel_state": "completed"
+}

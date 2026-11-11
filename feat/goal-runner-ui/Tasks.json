@@ -1,0 +1,84 @@
+{
+  "track": "goal-runner-ui",
+  "kind": "feature",
+  "date": "2026-10-08",
+  "status": "in_progress",
+  "objective": "Настройки всех ролей и полный цикл управления goal runner из локальной вкладки Orca и CLI.",
+  "invariants": [
+    "Не менять основной frontend/backend и чужие изменения",
+    "Только зарегистрированные ресурсы попытки",
+    "Неизвестная остановка блокирует повтор",
+    "Один runner, UI не читает mailbox",
+    "Секреты не копируются в конфигурацию"
+  ],
+  "queue": [
+    {
+      "id": "config",
+      "status": "completed",
+      "task": "Defaults, подключения, валидатор, overrides, снимки"
+    },
+    {
+      "id": "runtime",
+      "status": "completed",
+      "task": "Launcher, реестр, управление, восстановление"
+    },
+    {
+      "id": "ui",
+      "status": "completed",
+      "task": "Loopback сервер и отдельная панель team"
+    },
+    {
+      "id": "verification",
+      "status": "blocked",
+      "task": "Python, браузер, CLI smoke, обязательные проверки"
+    },
+    {
+      "id": "recovery-ui",
+      "status": "completed",
+      "task": "Восстановление unknown по квитанциям и identity без ручного JSON"
+    },
+    {
+      "id": "session-reuse",
+      "status": "completed",
+      "task": "Повторное использование implementer/tester в одной функции при неизменных параметрах"
+    },
+    {
+      "id": "settings-comparison",
+      "status": "completed",
+      "task": "Текущий снимок, следующий пункт, CLI overrides и подтверждения"
+    },
+    {
+      "id": "crash-tests",
+      "status": "completed",
+      "task": "Тесты прерываний запуска, остановки и управляющих команд"
+    },
+    {
+      "id": "browser-automation",
+      "status": "completed",
+      "task": "Автоматизированный изолированный браузерный цикл"
+    }
+  ],
+  "verification": [
+    "python3 team/tests/test_goal_runner.py (32 tests)",
+    "python3 team/tests/test_runner_recovery.py (13 tests, multiple crash-boundary subcases)",
+    "five existing standalone team/tests scripts",
+    "python3 team/tests/runner_browser_check.py (PASS)",
+    "go test ./... (PASS, cached)",
+    "npm run build (PASS, existing chunk warning)",
+    "Codex live first + reused Dispatch PASS; Claude first/reuse INCOMPLETE (provider limit)"
+  ],
+  "latest_attempt": {
+    "date": "2026-10-08",
+    "result": "five improvements implemented; Python/team/browser/Go/build and Codex reuse PASS; Claude live verification blocked by provider session limit"
+  },
+  "execution_rules": [
+    "Без коммитов и смены ветки",
+    "Рабочую очередь цели не запускать"
+  ],
+  "panel": {
+    "phase": "verification",
+    "blockers": [
+      "Claude ctx_709a87c8d568: session limit; first response and live reuse not verified. All owned smoke terminals/mailboxes closed."
+    ]
+  }
+}

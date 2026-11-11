@@ -1,0 +1,55 @@
+{
+  "track": "team-templates",
+  "kind": "feature",
+  "date": "2026-10-13",
+  "status": "completed",
+  "goals": [
+    "Два редактируемых встроенных шаблона; v2 роли и резервы; безопасный запуск Cloud.ru с effort"
+  ],
+  "invariants": [
+    "Immutable snapshots; no automatic fallback or replay",
+    "Cloud.ru canonical Sber boundary; CLOUD_API only child environment",
+    "No live goals, commits or branch changes"
+  ],
+  "queue": [
+    {
+      "id": "configuration",
+      "status": "completed"
+    },
+    {
+      "id": "launch",
+      "status": "completed"
+    },
+    {
+      "id": "ui-cli",
+      "status": "completed"
+    },
+    {
+      "id": "materials",
+      "status": "completed"
+    },
+    {
+      "id": "verification",
+      "status": "completed"
+    }
+  ],
+  "verification": [
+    "PYTHONPATH=src:tests python3 -m unittest test_goal_runner test_runner_recovery test_risk_routing test_mkspec test_template_ui_cli test_opencode2_config test_opencode2 test_cloud_launch test_config_templates test_platform test_opencode_wire: 116 tests PASS (26.092s)",
+    "Isolated browser template/reserve/save/restore/lifecycle: PASS; evidence/browser-result.json",
+    "Actual installed opencode2 loopback API: 5 models, reasoning_effort, DeepSeek/GLM thinking, tool continuation PASS",
+    "python3 -m compileall -q src/team_runner: PASS; node --check src/team_runner/runner-ui/app.js: PASS",
+    "Read-only review found replacement guard gap; fixed for fresh primary and reserve across implementation levels; regression PASS",
+    "No live provider calls or registered project goals launched"
+  ],
+  "latest_attempt": {
+    "date": "2026-10-13",
+    "result": "Реализовано; изолированная приёмка PASS. Реальное применение effort провайдером не проверялось."
+  },
+  "execution_rules": [
+    "Isolated checks only"
+  ],
+  "panel": {
+    "phase": "completed",
+    "blockers": []
+  }
+}

@@ -1,0 +1,8 @@
+2026-10-08: Реализованы defaults и общий валидатор девяти ролей, snapshots, CLI overrides и подключения Codex/Claude без копирования ключей.
+2026-10-08: Добавлены реестр ресурсов, атомарное состояние, lock, команды pause/stop/retry, сохранение mailbox до ack и защита от повторов/устаревших команд.
+2026-10-08: Добавлена локальная HTTP-панель в team/runner-ui; токен/Host/Origin, собственный терминал runner, настройки/цель/агенты/вопросы/gates/логи.
+2026-10-08: Live smoke Codex — worker_done succeeded; Claude — dispatch принят, ответ заблокирован session limit. Оба smoke-терминала и mailbox закрыты. Рабочая очередь цели не запускалась.
+2026-10-08: Python/HTTP, старые team-тесты, go test ./... и frontend build пройдены. Браузерный цикл на изолированном fixture пройден; см. evidence/verification.md. Финальная live-проверка Claude ожидает восстановления лимита.
+2026-10-08: Принято продолжение — пять улучшений восстановления, reuse, сравнения настроек и автоматических проверок.
+2026-10-08: Пять улучшений реализованы: durable operations/bootstrap marker, reconcile/continue-operation, явный reuse с проверками, сравнение конфигов, fault injection и browser-команда. Только team/ и этот трек.
+2026-10-08: 32+13 Python tests, пять standalone team scripts, browser acceptance, Go tests и frontend build PASS. Codex: два succeeded Dispatch, один терминал, контекст 2%, cleanup подтверждён. Claude: session limit, ответ/reuse INCOMPLETE; cleanup подтверждён. См. evidence/improvements-verification.md.

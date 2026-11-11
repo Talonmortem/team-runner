@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# Local generated graphs and execution evidence.
+/graphify-out/
+feat/**/evidence/

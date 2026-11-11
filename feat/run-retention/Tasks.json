@@ -1,0 +1,40 @@
+{
+  "date": "2026-10-31",
+  "status": "completed",
+  "objective": "Очистка воспроизводимых данных старых попыток без потери evidence и возобновления SHM",
+  "invariants": [
+    "Не удалять состояние текущей попытки, evidence, snapshots и журналы; тяжёлые копии завершённых подпроверок освобождать только после проверяемого архивирования",
+    "Unknown/active/process-referenced каталоги исключены",
+    "Сначала dry-run, применение журналируется; общий кеш сохраняется"
+  ],
+  "queue": [
+    {
+      "id": "cleanup",
+      "status": "completed",
+      "task": "CLI очистки, защитные тесты и документация"
+    },
+    {
+      "id": "operate",
+      "status": "completed",
+      "task": "Очистить старые временные данные, возобновить SHM"
+    },
+    {
+      "id": "compact-runs",
+      "status": "completed",
+      "task": "Дедуплицированный проверяемый архив bundle/copy завершённых подпроверок, восстановление, контроль накопления и продолжение SHM"
+    }
+  ],
+  "verification": [
+    "PYTHONPATH=src:tests python3 -m unittest test_retention test_agent_cli test_commands_v1: 43 PASS",
+    "systemd-analyze --user verify: PASS",
+    "359 generated directories removed; 140.76 GiB; current attempt and unknown resources preserved",
+    "PYTHONPATH=src:tests python3 -m unittest test_artifacts test_retention test_agent_cli test_commands_v1: 54 PASS (lossless restore, corruption refusal, interrupted deletion recovery, storage admission)",
+    "Real archived vite-cache restore/recompact: 20 entries, SHA256/mode/mtime PASS",
+    "systemd hourly service/timer verify PASS; SHM resume running confirmed"
+  ],
+  "latest_attempt": "2026-10-31: 147.07 GiB of completed verification copies archived in 1.1 GiB CAS; 218.42 GiB free. Real restore bytes/mode/mtime PASS; 220 archive receipts finalized. Hourly timer active; storage prepare/sweep mandatory in fresh context. POA-02 attempt a5f966a6-bf39-4161-b206-ca9a7c0582c3 running confirmed, blocker=null; OpenAI-only/Terra/auto_continue verified.",
+  "execution_rules": [
+    "Без commit/смены ветки; запуск SHM только как пользовательская операция"
+  ],
+  "panel_state": "completed"
+}
