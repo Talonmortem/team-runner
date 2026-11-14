@@ -214,6 +214,9 @@ def connections(home=None, repo=None, config_root=None):
 
 def validate(config, catalog=None, repo=None, config_root=None, *, allow_unavailable_fast=False):
     catalog = catalog if catalog is not None else connections(repo=repo, config_root=config_root)
+    if isinstance(config, dict) and type(config.get('version')) is int and config['version'] == 3:
+        from .team_graph import validate as validate_graph
+        return validate_graph(config, catalog, repo, config_root, allow_unavailable_fast)
     if not isinstance(config, dict) or type(config.get('version')) is not int or config['version'] not in (1, 2):
         raise ValueError('configuration requires version=1 or version=2')
     expected = {'version', 'roles'} if config['version'] == 1 else {'version', 'template', 'roles', 'reserves'}
@@ -235,6 +238,11 @@ def validate(config, catalog=None, repo=None, config_root=None, *, allow_unavail
         if not isinstance(config['reserves'], dict) or set(config['reserves']) != set(ROLES):
             raise ValueError('configuration must contain reserves for all supported roles')
         settings += [(role + ' reserve', cfg) for role, cfg in config['reserves'].items() if cfg is not None]
+    validate_settings(settings, catalog, repo, config_root, allow_unavailable_fast)
+    return copy.deepcopy(config)
+
+
+def validate_settings(settings, catalog, repo, config_root, allow_unavailable_fast=False):
     for role, cfg in settings:
         if not isinstance(cfg, dict) or not FIELDS <= set(cfg) or set(cfg) - FIELDS - OPTIONAL_FIELDS:
             raise ValueError(f'{role}: expected {sorted(FIELDS)}')
@@ -276,11 +284,13 @@ def validate(config, catalog=None, repo=None, config_root=None, *, allow_unavail
                 # Validate without retaining or publishing the contents (may contain credentials).
                 if not isinstance(json.loads(path.read_text()), dict):
                     raise ValueError(f'{role}: settings must be a JSON object')
-    return copy.deepcopy(config)
+
 
 
 def settings_update(payload, current, catalog=None, repo=None, config_root=None):
     """Legacy role-only saves preserve newer roles and explicit reserves."""
+    if current.get("version") == 3 and payload.get("version") != 3:
+        raise ValueError("graph settings require a version=3 save")
     if (isinstance(payload, dict) and set(payload) == {'version', 'roles'}
             and payload['version'] == 1 and isinstance(payload['roles'], dict)
             and not set(payload['roles']) - set(ROLES)):
@@ -295,6 +305,16 @@ def snapshot_role(attempt, role, variant='primary'):
     if variant not in ('primary', 'reserve'):
         raise ValueError('unsupported role variant')
     snapshot = json.loads((Path(attempt) / 'config.json').read_text())
+    if snapshot.get('version') == 3:
+        matches = [n for n in snapshot['nodes'] if n['id'] == (snapshot['root'] if role == 'coordinator' else role)]
+        if not matches:
+            matches = [n for n in snapshot['nodes'] if n['role'] == role]
+        if len(matches) != 1:
+            raise ValueError('ambiguous or absent agent; choose an edge')
+        cfg = matches[0]['reserve' if variant == 'reserve' else 'primary']
+        if cfg is None:
+            raise ValueError('reserve absent from this attempt snapshot')
+        return cfg
     roles = snapshot.get('reserves', {}) if variant == 'reserve' else snapshot['roles']
     if role not in roles or roles[role] is None:
         raise ValueError(f"role {role!r} is absent from this attempt snapshot; configure a new attempt")
@@ -311,6 +331,12 @@ def load_config(state_dir, path=None, overrides=None, catalog=None, layers=(), r
     if source.exists():
         saved = json.loads(source.read_text())
         version = saved.get('version', 1)
+        if version == 3:
+            cfg = validate(saved, catalog, repo, config_root, allow_unavailable_fast=allow_unavailable_fast)
+            from .team_graph import node
+            coordinator = node(cfg, cfg['root'])['primary']
+            apply_coordinator_overrides(coordinator, overrides, catalog, config_root)
+            return validate(cfg, catalog, repo, config_root, allow_unavailable_fast=allow_unavailable_fast)
         if version not in (1, 2) or set(saved) - ({'version', 'roles'} if version == 1 else {'version', 'template', 'roles', 'reserves', 'auto_continue_after_replan'}):
             raise ValueError('unsupported configuration')
         cfg['auto_continue_after_replan'] = saved.get('auto_continue_after_replan', False)
@@ -334,8 +360,13 @@ def load_config(state_dir, path=None, overrides=None, catalog=None, layers=(), r
         cfg['roles']['implementer_medium'] = copy.deepcopy(cfg['roles']['implementer_standard'])
     if not source.exists() and path:
         raise ValueError(f'configuration file does not exist: {path}')
+    apply_coordinator_overrides(cfg['roles']['coordinator'], overrides, catalog, config_root)
+    return validate(cfg, catalog, repo=repo, config_root=config_root,
+                    allow_unavailable_fast=allow_unavailable_fast)
+
+
+def apply_coordinator_overrides(c, overrides, catalog, config_root):
     overrides = {k: v for k, v in (overrides or {}).items() if v is not None}
-    c = cfg['roles']['coordinator']
     previous = dict(c)
     if overrides.get('agent') and overrides['agent'] != c['agent']:
         c.update(agent=overrides['agent'], profile='', provider='', model='gpt-6.1-sol', effort='high')
@@ -349,8 +380,6 @@ def load_config(state_dir, path=None, overrides=None, catalog=None, layers=(), r
     if ('fast' not in overrides and any(c.get(k) != previous.get(k) for k in ('agent', 'model', 'provider', 'profile'))
             and not fast_supported(c, catalog)):
         c.pop('fast', None)
-    return validate(cfg, catalog, repo=repo, config_root=config_root,
-                    allow_unavailable_fast=allow_unavailable_fast)
 
 
 def projections(state_dir, state, resources, layers=(), repo=None, config_root=None):
@@ -369,18 +398,22 @@ def projections(state_dir, state, resources, layers=(), repo=None, config_root=N
     from .runner_store import read_json
     snapshot = read_json(Path(attempt) / 'config.json', {}) if attempt else {}
     source = Path(options.get('config') or Path(state_dir) / 'config.json')
-    raw = read_json(source, {}).get('roles', {})
+    from .team_graph import role_settings
+    graph = saved.get('version') == 3
+    root = saved.get('root', 'coordinator')
+    raw = role_settings(read_json(source, {})).get('roles', {})
+    saved, effective, snapshot = map(role_settings, (saved, effective, snapshot))
     result = {}
-    for role in ROLES:
+    for role in saved['roles']:
         sources = {k: ('saved: ' + str(source) if k in raw.get(role, {}) else 'workspace/project/defaults') for k in FIELDS | OPTIONAL_FIELDS}
-        if role == 'coordinator':
+        if role == root:
             for k in FIELDS | OPTIONAL_FIELDS:
                 if k in overrides:
                     sources[k] = 'CLI --' + k
-                elif effective['roles'][role].get(k) != saved['roles'][role].get(k):
+                elif effective['roles'].get(role, {}).get(k) != saved['roles'][role].get(k):
                     sources[k] = 'CLI runtime/profile defaults'
-        agents = [a for a in resources.get('agents', []) if a.get('role') == role]
-        result[role] = {'error': error, 'saved': saved['roles'][role], 'next': effective['roles'][role],
+        agents = [a for a in resources.get('agents', []) if a.get('node_id' if graph else 'role') == role]
+        result[role] = {'error': error, 'saved': saved['roles'][role], 'next': effective['roles'].get(role, {}),
                         'sources': sources, 'snapshot': snapshot.get('roles', {}).get(role),
                         'reserve_saved': saved.get('reserves', {}).get(role),
                         'reserve_next': effective.get('reserves', {}).get(role),

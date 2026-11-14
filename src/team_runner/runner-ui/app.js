@@ -9,7 +9,7 @@ function same(target) {return target === selected;}
 const drafts = new Map();
 const fastCapabilities = new Map();
 async function api(path, data, target = selected) {
-  const global = path.startsWith('projects') || path === 'services';
+  const global = path.startsWith('projects') || path === 'services' || path === 'team-profiles';
   const address = global ? '/api/' + path : '/api/' + target + '/' + path;
   if (!target && !global) throw new Error('Выберите каталог');
   const response = await fetch(address, {method: data === undefined ? 'GET' : 'POST',
@@ -31,29 +31,31 @@ function datalist(id) {
   return list;
 }
 function renderSettings() {
+  graphConnect = null;
   $('auto-continue-after-replan').checked = settings.auto_continue_after_replan === true;
   $('template').value = settings.template || 'current';
   $('roles').replaceChildren();
-  for (const role of Object.keys(settings.roles)) {
-    renderRole(role, settings.roles[role], false);
-    renderRole(role, settings.reserves?.[role], true);
-  }
+  settings = graphConfig(settings);
+  renderGraph(); renderLibrary(); renderInspector();
   renderComparison();
 }
 function renderRole(role, cfg, reserve) {
+  const graphNode = settings.version === 3 ? settings.nodes.find(n => n.id === role) : null;
+  const roleDefaults = defaults.roles[graphNode?.role || role] || defaults.roles.explorer;
   const tr = node('tr', undefined, $('roles')), label = node('td', role + (reserve ? ' · резерв' : ''), tr);
   if (reserve) {
     const enabled = node('input', undefined, label); enabled.type = 'checkbox'; enabled.checked = !!cfg;
     enabled.setAttribute('aria-label', role + ' reserve enabled');
     enabled.onchange = () => {
-      settings.reserves ||= {};
-      settings.reserves[role] = enabled.checked ? structuredClone(settings.roles[role]) : null;
+      if (graphNode) graphNode.reserve = enabled.checked ? structuredClone(graphNode.primary) : null;
+      else {settings.reserves ||= {}; settings.reserves[role] = enabled.checked ? structuredClone(settings.roles[role]) : null;}
       $('saved').textContent = 'Не сохранено'; renderSettings();
     };
   }
   if (!cfg) {const td = node('td', 'Не задан', tr); td.colSpan = 6; return;}
   for (const key of ['agent', 'profile', 'provider', 'model', 'effort']) {
     const td = node('td', undefined, tr);
+    td.dataset.label = {agent:'CLI',profile:'Профиль подключения / settings',provider:'Провайдер',model:'Модель',effort:'Reasoning'}[key];
     const input = node(key === 'agent' || key === 'effort' ? 'select' : 'input', undefined, td);
     input.setAttribute('aria-label', role + (reserve ? ' reserve' : '') + ' ' + key);
     if (key === 'agent') (catalog.runtimes || ['claude', 'codex']).forEach(v => option(input, v));
@@ -70,8 +72,8 @@ function renderRole(role, cfg, reserve) {
         Object.assign(cfg, cfg.agent === 'opencode2' ? {profile: '', provider: 'cloudru',
           model: catalog.opencode2?.default_model || catalog.opencode2?.models?.[0] || '', effort: 'high'} :
           cfg.agent === 'claude' ? {profile: '', provider: 'current', model: 'claude-opus-5-5', effort: 'high'} :
-          {profile: '', provider: catalog.current_provider || '', model: defaults.roles[role].agent === 'codex' ? defaults.roles[role].model : 'gpt-6.1-sol',
-            effort: defaults.roles[role].agent === 'codex' ? defaults.roles[role].effort : 'high'});
+          {profile: '', provider: catalog.current_provider || '', model: roleDefaults.agent === 'codex' ? roleDefaults.model : 'gpt-6.1-sol',
+            effort: roleDefaults.agent === 'codex' ? roleDefaults.effort : 'high'});
         renderSettings();
       }
       if (key === 'profile' && cfg.agent === 'codex') {cfg.provider = catalog.profiles[cfg.profile]?.provider || ''; renderSettings();}
@@ -81,7 +83,7 @@ function renderRole(role, cfg, reserve) {
       $('saved').textContent = 'Не сохранено'; renderComparison();
     };
   }
-  const speedCell = node('td', undefined, tr);
+  const speedCell = node('td', undefined, tr);speedCell.dataset.label = 'Fast';
   renderFastControl(speedCell, role, cfg, reserve);
 }
 function capabilityKey(cfg) {
@@ -134,7 +136,8 @@ function renderComparison() {
     const table = node('table', undefined, box), head = node('tr', undefined, table);
     ['Параметр', 'Черновик', 'Сохранено', 'Следующий пункт', 'Источник', 'Снимок', 'Факт'].forEach(t => node('th', t, head));
     for (const reserve of [false, true]) for (const key of ['agent','profile','provider','model','effort','fast']) {
-      const draft = (reserve ? settings?.reserves?.[role] : settings?.roles?.[role])?.[key];
+      const graphNode = settings?.nodes?.find(n => n.id === role);
+      const draft = (graphNode ? (reserve ? graphNode.reserve : graphNode.primary) : (reserve ? settings?.reserves?.[role] : settings?.roles?.[role]))?.[key];
       const saved = (reserve ? p.reserve_saved : p.saved)?.[key];
       const next = (reserve ? p.reserve_next : p.next)?.[key];
       const snapshot = (reserve ? p.reserve_snapshot : p.snapshot)?.[key];
@@ -230,7 +233,7 @@ async function observeRequests(target = selected) {
     try {
       const result = await api('operations/' + record.request_id, undefined, target);
       receipt(record,result);
-      if (same(target) && record.action === 'configure' && result.status === 'succeeded' && result.result?.roles) {
+      if (same(target) && record.action === 'configure' && result.status === 'succeeded' && (result.result?.roles || result.result?.version === 3)) {
         settings = result.result; renderSettings(); $('saved').textContent = 'Сохранено';
       }
     }
@@ -390,6 +393,7 @@ function renderQuestions(cur, target) {
   }
 }
 function renderDetails(v, target) {
+  renderGraphLimits(v, target);
   const events = v.events || {events:[],overdue:0};
   $('event-warning').textContent = events.overdue ? `Не обработано более 5 минут: ${events.overdue}` : '';
   const checks = v.verification || {checks:[],records:[]};
@@ -501,7 +505,7 @@ async function refresh() {
 function selectTemplate() {
   const template = templates.find(t => t.id === $('template').value);
   if (!template?.available) throw new Error('Cloud.ru доступен только внутри ~/repo/sber');
-  settings = structuredClone(template.config); renderSettings(); $('saved').textContent = 'Не сохранено';
+  settings = graphConfig(structuredClone(template.config)); teamProfileId = ''; graphSelection = null; renderSettings(); $('saved').textContent = 'Не сохранено';
 }
 $('template').onchange = handle(selectTemplate);
 $('recovery-enabled').onchange = handle(async () => {
@@ -546,7 +550,7 @@ async function selectProject(workspaceId) {
 }
 function rememberWorkspace() {
   if (!selected || loadedTarget !== selected) return;
-  workspaceDrafts.set(selected,{settings:structuredClone(settings),profile:$('workspace-profile').value,
+  workspaceDrafts.set(selected,{settings:structuredClone(settings),teamProfileId,graphSelection:structuredClone(graphSelection),graphView:structuredClone(graphView),profileName:$('team-profile-name').value,profile:$('workspace-profile').value,
     goal:$('goal').value,items:$('items').value,mode:$('mode').value,final:$('final').checked,recovery:$('execute-recovery').checked,saved:$('saved').textContent});
 }
 async function selectWorkspace() {
@@ -555,7 +559,7 @@ async function selectWorkspace() {
   fastCapabilities.clear();
   const p = projects[$('project').value], w = p?.workspaces[$('workspace').value];
   selected = w ? `projects/${p.id}/workspaces/${w.id}` : '';
-  currentDetail = null; settings = undefined; comparison = {};
+  currentDetail = null; settings = undefined; comparison = {}; graphConnect = null;
   $('workspace-panel').hidden = !w;
   $('empty-state').hidden = !!w;
   $('empty-state').textContent = p ? 'Подключите существующий Git checkout в настройках ниже.' : 'Создайте проект и подключите Git checkout в настройках ниже.';
@@ -572,11 +576,13 @@ async function selectWorkspace() {
   if (version === selectionVersion) await refresh();
 }
 async function loadWorkspaceConfig(target, version) {
-  const [data, profile] = await Promise.all([api('config', undefined, target), api('profile', undefined, target)]);
+  const [data, profile, library] = await Promise.all([api('config', undefined, target), api('profile', undefined, target), api('team-profiles')]);
   if (version !== selectionVersion) return;
   $('config-source').textContent = 'Файл: ' + data.source;
   const draft = workspaceDrafts.get(target);
-  settings = draft ? structuredClone(draft.settings) : data.config; defaults = data.defaults; catalog = data.connections; templates = data.templates || [];
+  settings = draft ? structuredClone(draft.settings) : (data.graph || graphConfig(data.config));
+  teamLibrary = library.profiles; teamProfileId = draft?.teamProfileId || ''; graphSelection = draft?.graphSelection || null; graphView = draft?.graphView || {x:0,y:0,w:1200,h:800};
+  $('team-profile-name').value = draft?.profileName || '';  defaults = data.defaults; catalog = data.connections; templates = data.templates || [];
   $('template').replaceChildren();
   for (const t of templates) {option($('template'), t.id, t.name); $('template').lastChild.disabled = !t.available;}
   for (const id of ['profiles','providers','models','goal']) $(id).replaceChildren();
@@ -593,6 +599,7 @@ async function loadWorkspaceConfig(target, version) {
   if (!data.goals.length) {$('status').textContent = 'Нет целей в tracking root. Проверьте профиль каталога.';}
   loadedTarget = target;
   renderSettings();
+  if (!draft) fitGraph();
 }
 $('project').onchange = handle(() => selectProject());
 $('workspace').onchange = handle(selectWorkspace);

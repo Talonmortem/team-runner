@@ -7,6 +7,8 @@ import os
 
 from . import goal_intent
 from .protocol import ContractError, attempt_identity
+from pathlib import Path
+from .runner_store import read_json
 
 _MAX_CURSOR = 16384
 
@@ -23,7 +25,9 @@ def _decode(value):
         raw = base64.b64decode(value + '=' * (-len(value) % 4), altchars=b'-_', validate=True)
         cursor = json.loads(raw)
         if (not isinstance(cursor, dict)
-                or set(cursor) != {'schema_version', 'identity', 'generation', 'run_id', 'attempt', 'offset'}
+                or set(cursor) not in ({'schema_version', 'identity', 'generation', 'run_id', 'attempt', 'offset'},
+                                      {'schema_version', 'identity', 'generation', 'run_id', 'attempt', 'offset', 'dispatch'})
+                or 'dispatch' in cursor and not isinstance(cursor['dispatch'], str)
                 or type(cursor['schema_version']) is not int or cursor['schema_version'] != 1
                 or not isinstance(cursor['identity'], dict)
                 or type(cursor['offset']) is not int or cursor['offset'] < 0
@@ -94,10 +98,22 @@ def messages(runner, after=None, limit=100):
             else:
                 positions[key] = len(ordered)
                 ordered.append(message)
+    dispatch = None
+    if child_attempt and read_json(Path(child_attempt) / 'config.json', {}).get('version') == 3:
+        from .graph_dispatch import caller, messages as routed_messages
+        reg = runner.launcher.registry(child_attempt)
+        dispatch = caller(runner.launcher, child_attempt, reg)['dispatch_id']
+        if cursor and cursor.get('dispatch') != dispatch:
+            raise ContractError('child_scope_mismatch', 'Messages cursor belongs to another caller Dispatch')
+        ordered = routed_messages(runner.launcher, child_attempt, ordered)
+    elif cursor and cursor.get('dispatch'):
+        raise ContractError('child_scope_mismatch', 'Dispatch cursor requires its registered caller')
     if offset > len(ordered):
         raise ContractError('invalid_cursor', 'Message cursor offset exceeds retained messages')
     end = min(offset + limit, len(ordered))
     following = {'schema_version': 1, 'identity': identity, 'generation': generation,
                  'run_id': run_id, 'attempt': selected, 'offset': end}
+    if dispatch:
+        following['dispatch'] = dispatch
     return {'schema_version': 1, 'identity': identity, 'items': copy.deepcopy(ordered[offset:end]),
             'next_cursor': _encode(following), 'has_more': end < len(ordered)}

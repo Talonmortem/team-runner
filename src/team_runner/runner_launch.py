@@ -61,7 +61,8 @@ class Launcher:
             return result
         if config['agent'] != 'claude':
             raise ValueError('unsupported runtime')
-        result = ['claude', '--model', config['model'], '--effort', config['effort']]
+        result = ['claude', '--model', config['model'], '--effort', config['effort'],
+                  '--disallowedTools', 'Agent', 'Task']
         if config['profile']:
             result += ['--settings', str(Path(config['profile']).expanduser())]
         if 'fast' in config:
@@ -125,6 +126,13 @@ class Launcher:
         Called under agents.lock, including immediately before registration.
         Read immutable policy, never the mutable workspace profile.
         """
+        if read_json(Path(attempt) / 'config.json', {}).get('version') == 3:
+            from .graph_dispatch import guard
+            record = next((a for a in reg['agents'] if task_id and a.get('task_id') == task_id), None)
+            if record is None:
+                raise ValueError('graph launch requires registered call identity')
+            guard(self, attempt, reg, record)
+            return
         policy = read_json(Path(attempt) / 'context.json', {}).get('profile', {}).get('workflow', {})
         if role == 'coordinator' or not policy.get('sequential_agents', False):
             return
@@ -248,12 +256,19 @@ class Launcher:
 
     def _launch(self, attempt, reg, record, title, state_dir, retry_of=None, permitted=None):
         self.sequential_guard(attempt, reg, record['role'], record['task_id'])
+        graph_call = next((c for c in reg.get('graph_calls', []) if c['id'] == record.get('call_id')), None)
+        if graph_call:
+            from .graph_dispatch import execution_allowed
+            outer_permitted = permitted
+            permitted = lambda: execution_allowed(self, attempt, graph_call['authorization']) and (outer_permitted is None or outer_permitted())
         cfg = record['requested']
         record.setdefault('launch_title', title)
         record.setdefault('retry_of', retry_of)
         self.save_registry(attempt, reg)
         runner_config.validate_role_scope(cfg, self.context.repo)
         try:
+            if permitted is not None and not permitted():
+                raise RuntimeError('launch continuation cancelled by user intent')
             if not record.get('terminal'):
                 runtime = self.prepare_runtime(attempt)
                 env = self.context.environment(attempt)
@@ -285,6 +300,9 @@ class Launcher:
                          '--task', record['task_id'], '--run', record['run_id'], '--terminal', record['terminal'],
                          '--worktree', 'id:' + self.context.orca_id, '--timeout-ms', '60000', *options, mailbox=record.get('mailbox'))
             record.update(dispatch_id=res['dispatchId'], status='active', launch_confirmation=res)
+            if record.get('call_id'):
+                graph_call = next(c for c in reg['graph_calls'] if c['id'] == record['call_id'])
+                graph_call.update(child_agent=record['id'], dispatch_id=record['dispatch_id'], status='running')
             if record.get('reuse'):
                 old = next(a for a in reg['agents'] if a.get('dispatch_id') == record['reuse'])
                 old.update(status='superseded', superseded_by=record['dispatch_id'])
@@ -303,6 +321,9 @@ class Launcher:
         self.context.check_attempt(attempt)
         from .runner_config import snapshot_role
         self.validate_variant(variant, reason, reuse)
+        graph = read_json(attempt / 'config.json', {})
+        if graph.get('version') == 3 and role != 'coordinator':
+            raise ValueError('graph workers must use an allowed edge')
         cfg = snapshot_role(attempt, role, variant)
         runner_config.validate_role_scope(cfg, self.context.repo)
         self.preflight(cfg)
@@ -322,7 +343,8 @@ class Launcher:
                 self.check_launch_recovery(reg)
                 return self._launch(attempt, reg, existing, title, state_dir, retry_of)
             self.check_launch_recovery(reg)
-            self.sequential_guard(attempt, reg, role, task_id)
+            if graph.get('version') != 3:
+                self.sequential_guard(attempt, reg, role, task_id)
             if variant == 'reserve' or (role.startswith('implementer_') and not reuse):
                 self.reserve_guard(reg, role, function)
             old = self.reuse_source(reg, role, cfg, function, reuse, context_percent) if reuse else None
@@ -333,6 +355,8 @@ class Launcher:
                           reuse=reuse, context_reading={'percent': context_percent, 'source': 'coordinator',
                                            'reported_by': os.environ.get('ORCA_TERMINAL_HANDLE'),
                                            'at': dt.datetime.now(dt.timezone.utc).isoformat()} if reuse else None)
+            if graph.get('version') == 3:
+                record['node_id'] = graph['root']
             if old:
                 record.update({k: old[k] for k in ('terminal', 'terminal_owned', 'incarnation')})
             reg['agents'].append(record)
@@ -357,7 +381,7 @@ class Launcher:
                     raise RuntimeError('acceptance Dispatch unconfirmed; reconcile first')
                 return dict(existing)
             old = next((a for a in reg['agents'] if a.get('dispatch_id') == dispatch_id), None)
-            cfg = read_json(attempt / 'config.json')['roles']['coordinator']
+            cfg = runner_config.snapshot_role(attempt, 'coordinator')
             if (not old or old.get('role') != 'coordinator' or old.get('status') != 'active'
                     or old.get('superseded_by') or old.get('requested') != cfg
                     or old.get('connection_stamp') != self.connection_stamp(cfg)
@@ -371,6 +395,7 @@ class Launcher:
             record = dict(id=str(uuid.uuid4()), role='coordinator', requested=cfg, observed=None,
                           task_id=task_id, run_id=run_id, mailbox=old.get('mailbox'), status='launching',
                           attempt=str(attempt), reuse=dispatch_id, acceptance_rework=True,
+                          **({'node_id': old['node_id']} if old.get('node_id') else {}),
                           connection_stamp=old['connection_stamp'])
             record.update({k: old[k] for k in ('terminal', 'terminal_owned', 'incarnation')})
             reg['agents'].append(record)
@@ -378,7 +403,7 @@ class Launcher:
             return self._launch(attempt, reg, record, 'acceptance correction', state_dir)
 
 
-    def child_run(self, attempt):
+    def child_run(self, attempt, permitted=None):
         with lock(Path(attempt) / 'agents.lock'):
             reg = self.registry(attempt)
             if reg['fenced']:
@@ -394,10 +419,14 @@ class Launcher:
                 reg['runs'].append(run)
                 self.save_registry(attempt, reg)
             try:
+                if permitted is not None and not permitted():
+                    raise RuntimeError('child run cancelled by user intent')
                 if not run.get('mailbox'):
                     terminal = self.create_terminal(attempt, 'mailbox', ['cat'], 'goal runner mailbox')
                     run.update(mailbox=terminal['handle'], incarnation=terminal.get('incarnationId'))
                     self.save_registry(attempt, reg)
+                if permitted is not None and not permitted():
+                    raise RuntimeError('child run cancelled by user intent')
                 r = self.effect(attempt, 'child-run', 'orchestration', 'run-create', '--objective',
                            'goal-runner child ' + Path(attempt).name, mailbox=run['mailbox'])['run']
                 run.update(run_id=r['id'], status='ready')
@@ -416,6 +445,8 @@ class Launcher:
 
     def dispatch_role(self, attempt, role, spec, title, state_dir, function=None, reuse=None, context_percent=None, keep_session=False, variant='primary', reason=None):
         self.context.check_attempt(attempt)
+        if read_json(Path(attempt) / 'config.json', {}).get('version') == 3:
+            raise ValueError('graph workers must use delegate or the CLI role shorthand')
         self.prepare_runtime(attempt)
         if role == 'coordinator':
             raise ValueError('coordinator is launched by run')
@@ -502,10 +533,9 @@ class Launcher:
 
 
     def restore_terminal_panel(self, attempt, record, data):
-        """Restore a detached live panel once; never restart or replay an agent.
+        """Observe owned live panels without changing Orca focus or layout.
 
-        UI effects have a separate durable journal so an uncertain focus change
-        cannot block worker lifecycle operations. Unknown switches are not retried.
+        Detached panels stay detached until the user explicitly opens them.
         Caller holds agents.lock, as for the lifecycle journal.
         """
         if (record.get('status') != 'active' or record.get('superseded_by')
@@ -534,21 +564,6 @@ class Launcher:
         if terminal.get('orphaned') is not True:
             return
         record['panel_status'] = 'orphaned'
-        if (terminal.get('connected') is not True or terminal.get('writable') is not True
-                or terminal.get('exitCause')):
-            return
-        journal = Path(attempt) / 'panel-operations.json'
-        key = record['id'] + '-panel-switch'
-        if key in read_json(journal, {}):
-            raise RuntimeError('terminal panel restoration already attempted; restore panel manually')
-        operations.mutation(journal, key,
-                            self.orca, 'terminal', 'switch', '--terminal', record['terminal'],
-                            mailbox=record.get('mailbox'),
-                            evidence={'terminal': record['terminal'], 'incarnation': record['incarnation'],
-                                      'worktree': self.context.orca_id})
-        if show().get('orphaned') is not False:
-            raise RuntimeError('terminal panel restoration unconfirmed; automatic switch will not repeat')
-        record['panel_status'] = 'visible'
         record.pop('panel_error', None)
 
 
@@ -589,6 +604,9 @@ class Launcher:
                 raise RuntimeError('release target not registered')
             registered.update(id=record['id'], attempt=str(attempt))
             self.save_registry(attempt, reg)
+        if attempt and any(c['parent_agent'] == record['id'] and c['status'] not in ('completed', 'stopped')
+                           for c in self.registry(attempt).get('graph_calls', [])):
+            raise RuntimeError('cannot release a parent with an unresolved child')
         data = self.observe_agent(record)
         status = (data.get('dispatch') or {}).get('status')
         failed_report = (status == 'failed' and accepted_done
@@ -810,6 +828,10 @@ class Launcher:
                 except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
                     run['error'] = str(exc)
                     confirmed = False
+            if confirmed:
+                for graph_call in reg.get('graph_calls', []):
+                    if graph_call['status'] != 'completed':
+                        graph_call.update(status='stopped', result={'outcome': 'stopped'})
             reg['stop_status'] = 'stopped' if confirmed else 'unknown'
             self.save_registry(attempt, reg)
             return confirmed
@@ -929,10 +951,14 @@ class Launcher:
                         for request in reg.get('launch_requests', []):
                             if request.get('task_id') == a.get('task_id'):
                                 request['status'] = 'done'
+                    if a.get('call_id'):
+                        graph_call = next(c for c in reg['graph_calls'] if c['id'] == a['call_id'])
+                        if graph_call.get('child_agent') == a['id'] and graph_call['status'] not in ('completed', 'stopped', 'settling'):
+                            graph_call.update(dispatch_id=a['dispatch_id'], status='running')
                     if a.get('reuse'):
                         old = next(x for x in reg['agents'] if x.get('dispatch_id') == a['reuse'])
                         old.update(status='superseded', superseded_by=a['dispatch_id'])
-                    a.update(status='active')
+                    a.update(status='waiting_child' if a.get('waiting_call') else 'active')
                     a.pop('error', None)
                     a.pop('cleanup_error', None)
                 except Exception as exc:
@@ -998,6 +1024,8 @@ class Launcher:
                     replacement.update(id=str(uuid.uuid4()), status='ready', replacement_of=record['id'])
                     record.update(status='superseded', superseded_by=replacement['id'])
                     reg['agents'].append(replacement)
+                    if replacement.get('call_id'):
+                        next(c for c in reg['graph_calls'] if c['id'] == replacement['call_id'])['child_agent'] = replacement['id']
                     self.save_registry(attempt, reg)
                     record = replacement
                 op = read_json(self.journal(attempt), {}).get(record['id'] + '-terminal', {})

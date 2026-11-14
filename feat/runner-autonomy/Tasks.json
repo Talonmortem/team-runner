@@ -1,0 +1,51 @@
+{
+  "date": "2026-11-14",
+  "status": "not_started",
+  "objective": "Ограниченная автономность и восстановление текущих сессий Team Runner",
+  "invariants": [
+    "Immutable attempt snapshots",
+    "Нет replay неизвестных эффектов",
+    "Бюджет workspace/generation/item/edge сохраняется между попытками",
+    "Pause/stop отменяют автоматику",
+    "FAIL не принимается; независимые проверки сохраняются",
+    "Не запускать зарегистрированные цели как тест"
+  ],
+  "queue": [
+    {
+      "id": "events",
+      "status": "not_started"
+    },
+    {
+      "id": "autonomy",
+      "status": "not_started"
+    },
+    {
+      "id": "network",
+      "status": "not_started"
+    },
+    {
+      "id": "visibility",
+      "status": "not_started"
+    },
+    {
+      "id": "verification",
+      "status": "not_started"
+    },
+    {
+      "id": "review",
+      "status": "not_started"
+    },
+    {
+      "id": "rollout",
+      "status": "not_started"
+    }
+  ],
+  "verification": [],
+  "latest_attempt": null,
+  "execution_rules": [
+    "Сохранить существующие изменения",
+    "Без commit и смены ветки",
+    "Изолированные тесты и браузер; затем общий unittest и независимое ревью"
+  ],
+  "panel_state": "not_started"
+}

@@ -129,6 +129,11 @@ Reuse requires prior --keep-session plus explicit --function ID --reuse DISPATCH
 same attempt/role/function/settings/connection. Reviewer always fresh. Never guess context usage.
 Store specs/reports under $TEAM_RUNNER_ATTEMPT. Do not launch other goals or alter branches.
 Update Tasks.json and evidence following snapshot acceptance. Commit only if workflow permits it.
+If accepting this item completes the feature's entire queue, settle feature acceptance BEFORE worker_done.
+A completed queue alone is not feature acceptance. Check all feature criteria and required independent evidence;
+within delegated authority, record feature acceptance and update both feature and goal tracking consistently.
+If an external owner must approve, ask that owner in this attempt before reporting succeeded; never invent approval.
+Preserve item scope while other feature items remain. Do not rerun unchanged expensive checks merely to close tracking.
 Runner acceptance requires queue status exactly completed and evidence at {evidence}.
 After worker_done, keep this session available: runner may dispatch acceptance corrections here.
 Questions and worker_done use the exact injected preamble. Send succeeded only after acceptance.
@@ -375,11 +380,20 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                                 ('check_scope', 'gate_roots', 'gate_command', 'depends_on')})
             atomic_json(attempt / "config.json", snapshot)
             cur["attempt_dir"] = str(attempt)
-            cur["requested"] = snapshot["roles"]["coordinator"]
+            cur["requested"] = config.snapshot_role(attempt, "coordinator")
             cur["snapshot_id"] = attempt.name
             cur["observed"] = None
             self.save_state(st)
         if cur.get("attempt_dir"):
+            frozen = read_json(Path(cur['attempt_dir']) / 'config.json', {})
+            if frozen.get('version') == 3:
+                from .team_graph import node
+                spec += ('\nGraph v3: delegate only along snapshot delegation edges via team-runner delegate EDGE_ID '
+                         '--spec FILE --title TITLE --request-id UUID. launch ROLE is allowed only for one matching edge. '
+                         'Nested delegation uses runner only; runtime subagents stay disabled. '
+                         'Calls wait for children. changes_requested is a rework result, never successful acceptance. '
+                         'Fresh child sessions; no --reuse or --keep-session.\nRoot instructions:\n' +
+                         node(frozen, frozen['root'])['instructions'])
             spec += "\nRead $TEAM_RUNNER_ATTEMPT/config.json before work. It is the authoritative role snapshot, including on retries."
         if not cur.get("task_id"):
             if cur.get("attempt", 1) > 1:
@@ -418,6 +432,16 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         return "start"
 
 
+    def check_open_graph_calls(self, cur, require_success=True):
+        if require_success and cur.get('attempt_dir'):
+            from .graph_dispatch import rework_problems
+            if rework_problems(self.launcher.registry(cur['attempt_dir'])):
+                raise RuntimeError('changes_requested requires a successful recheck')
+        if cur.get('attempt_dir') and any(c['status'] not in ('completed', 'stopped')
+                for c in self.launcher.registry(cur['attempt_dir']).get('graph_calls', [])):
+            raise RuntimeError('coordinator completed with unresolved graph calls')
+
+
     def wait_coordinator(self, st):
         cur = st["current"]
         for m in cur.get("messages", []):
@@ -425,6 +449,7 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             if isinstance(payload, str):
                 payload = json.loads(payload)
             if m.get("type") == "worker_done" and payload.get("dispatchId") == cur["dispatch_id"]:
+                self.check_open_graph_calls(cur, payload.get('outcome') == 'succeeded')
                 return {"outcome": payload.get("outcome", "unknown"), "body": m.get("body", "")}
         last_liveness_check = 0.0
         while True:
@@ -486,6 +511,7 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             if res.get("deliveryId"):
                 self.ack_delivery(st, res["deliveryId"], st["run_id"])
             if done:
+                self.check_open_graph_calls(cur, done.get('outcome') == 'succeeded')
                 return done
 
 
@@ -785,10 +811,52 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         if not attempt:
             raise ValueError("launch requires TEAM_RUNNER_ATTEMPT inherited from coordinator")
         self.context.check_attempt(attempt)
+        if read_json(Path(attempt) / 'config.json', {}).get('version') == 3:
+            if args.reuse or args.keep_session:
+                raise ValueError('graph delegation uses fresh child sessions')
+            from . import graph_dispatch
+            from .team_graph import node
+            with lock(Path(attempt) / 'agents.lock'):
+                reg = self.launcher.registry(attempt)
+                parent = graph_dispatch.caller(self.launcher, attempt, reg)
+                cfg = graph_dispatch.snapshot(self.launcher, attempt)
+                matches = [e for e in cfg['edges'] if e['type'] == 'delegation'
+                    and e['source'] == parent['node_id']
+                    and node(cfg, e['target'])['role'] == args.role]
+                if len(matches) != 1:
+                    raise ValueError('ambiguous or absent outgoing role; use delegate EDGE_ID')
+            args.edge = matches[0]['id']
+            args.request_id = args.request_id or str(uuid.uuid4())
+            return self.cmd_delegate(args)
         print(json.dumps(self.launcher.dispatch_role(attempt, args.role, Path(args.spec).read_text(),
                                                args.title, self.state_dir, function=args.function, reuse=args.reuse,
                                                context_percent=args.context_percent, keep_session=args.keep_session,
                                                variant=args.variant, reason=args.reason), ensure_ascii=False))
+
+
+    def cmd_delegate(self, args):
+        from . import graph_dispatch
+        attempt = os.environ.get('TEAM_RUNNER_ATTEMPT')
+        if not attempt:
+            raise ValueError('delegate requires inherited attempt context')
+        spec = Path(args.spec).read_text()
+        call = graph_dispatch.delegate(self.launcher, attempt, args.edge, spec, args.title,
+                                       self.state_dir, args.request_id, args.variant, args.reason)
+        while call['status'] not in graph_dispatch.TERMINAL:
+            if call['status'] == 'limit':
+                # Keep the parent tool invocation blocked until the explicit grant.
+                while call['status'] == 'limit':
+                    graph_dispatch.current(self.launcher, attempt)
+                    reg = self.launcher.registry(attempt)
+                    if reg.get('fenced') or reg.get('stop_requested'):
+                        raise RuntimeError('delegation fenced/stopped')
+                    time.sleep(.2)
+                    call = next(c for c in self.launcher.registry(attempt)['graph_calls'] if c['id'] == args.request_id)
+                call = graph_dispatch.delegate(self.launcher, attempt, args.edge, spec, args.title,
+                                               self.state_dir, args.request_id, args.variant, args.reason)
+            else:
+                call = graph_dispatch.wait(self.launcher, attempt, args.request_id)
+        print(json.dumps(call, ensure_ascii=False))
 
 
     def cmd_messages(self, args):
@@ -797,7 +865,11 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         cur = st.get("current") or {}
         if not attempt or attempt != cur.get("attempt_dir"):
             raise ValueError("no current attempt for this coordinator")
-        print(json.dumps(cur.get("messages", []), ensure_ascii=False))
+        messages = cur.get('messages', [])
+        if read_json(Path(attempt) / 'config.json', {}).get('version') == 3:
+            from .graph_dispatch import messages as routed_messages
+            messages = routed_messages(self.launcher, attempt, messages)
+        print(json.dumps(messages, ensure_ascii=False))
 
 
     def cmd_status(self, args):
@@ -900,19 +972,44 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         with lock(Path(attempt) / 'agents.lock'):
             reg = self.launcher.registry(attempt)
             for agent in reg['agents']:
-                if agent['role'] == 'coordinator' or agent.get('status') != 'active' or agent.get('keep_session'):
+                recover_call = agent.get('call_id') and agent.get('status') == 'released' and any(
+                    c['id'] == agent['call_id'] and c['status'] not in ('completed', 'stopped')
+                    for c in reg.get('graph_calls', []))
+                if agent['role'] == 'coordinator' or (agent.get('status') != 'active' and not recover_call) or agent.get('keep_session'):
                     continue
-                data = self.launcher.observe_agent(agent)
-                status = (data.get('dispatch') or {}).get('status')
                 report = reports.get(agent['dispatch_id'])
+                try:
+                    data = self.launcher.observe_agent(agent) if not recover_call else {'dispatch': {'status': 'completed'}}
+                    status = (data.get('dispatch') or {}).get('status')
+                    known_failure = status == 'failed' and report and report.get('outcome') == 'failed'
+                    if agent.get('call_id') and (
+                            data.get('worker', {}).get('state') == 'outcome_unknown'
+                            or status not in ('dispatched', 'completed') and not known_failure
+                            or data.get('worker', {}).get('state') == 'failed' and not known_failure
+                            or not report and data.get('observation', {}).get('status') == 'exited'):
+                        raise RuntimeError('child outcome unknown or worker exited without accepted worker_done')
+                except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+                    if not agent.get('call_id'):
+                        raise
+                    agent.update(status='unknown', error=str(exc))
+                    reg['fenced'] = True
+                    reg.setdefault('recovery_issues', []).append(str(exc))
+                    self.launcher.save_registry(attempt, reg)
+                    continue
                 if not report or (status != 'completed' and not (status == 'failed' and report.get('outcome') == 'failed')):
                     continue
                 # Завершение проверено в Orca; журнал сообщений уже сохранён до закрытия.
                 try:
-                    self.launcher.release_agent(agent, attempt, report)
+                    if agent.get('call_id'):
+                        from .graph_dispatch import settle
+                        settle(self.launcher, attempt, reg, agent, report)
+                    else:
+                        self.launcher.release_agent(agent, attempt, report)
                     agent.pop('cleanup_error', None)
                 except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
                     agent['cleanup_error'] = str(exc)
+                    if agent.get('call_id'):
+                        reg['fenced'] = True
                     self.launcher.save_registry(attempt, reg)
                     raise
                 self.launcher.save_registry(attempt, reg)
@@ -952,7 +1049,10 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             reg = self.launcher.registry(attempt)
             for agent in reg['agents']:
                 report = reports.get(agent.get('dispatch_id'))
-                if not report or agent.get('keep_session') or agent.get('status') in ('released', 'stopped', 'superseded'):
+                recover_call = agent.get('call_id') and agent.get('status') == 'released' and any(
+                    c['id'] == agent['call_id'] and c['status'] not in ('completed', 'stopped')
+                    for c in reg.get('graph_calls', []))
+                if not report or agent.get('keep_session') or (agent.get('status') in ('released', 'stopped', 'superseded') and not recover_call):
                     continue
                 # Successful coordinators explicitly retain their session for acceptance corrections.
                 if agent.get('role') == 'coordinator' and report.get('outcome') == 'succeeded':
@@ -960,11 +1060,17 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 if permitted is not None and not permitted():
                     raise RuntimeError('cleanup cancelled by user intent')
                 try:
-                    self.launcher.release_agent(agent, attempt, report)
+                    if agent.get('call_id'):
+                        from .graph_dispatch import settle
+                        settle(self.launcher, attempt, reg, agent, report)
+                    else:
+                        self.launcher.release_agent(agent, attempt, report)
                     agent.pop('error', None)
                     agent.pop('cleanup_error', None)
                 except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
                     agent['cleanup_error'] = str(exc)
+                    if agent.get('call_id'):
+                        reg['fenced'] = True
                     self.launcher.save_registry(attempt, reg)
                     raise
                 self.launcher.save_registry(attempt, reg)
@@ -1003,7 +1109,8 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                             'dispatch_id': agent['dispatch_id'], 'reason': agent['work_incomplete'],
                             'prior_dispatches': [a.get('dispatch_id') for a in reg['agents']]})
             self.launcher.save_registry(attempt, reg)
-        problems = []
+        from .graph_dispatch import rework_problems
+        problems = rework_problems(reg)
         for requirement in cur.get('required_child_reports', []):
             fresh = next((a for a in reg['agents']
                 if a.get('role') == requirement['role'] and a.get('function') == requirement['function']
@@ -1243,9 +1350,11 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                     # All creation receipts proved, no process owns runner.lock.
                     atomic_json(self.state_dir / 'startup.json', {'status': 'idle'})
         if cur.get('attempt_dir'):
-            recovery_args = {'accepted_reports': self.accepted_child_reports(cur['attempt_dir'])} if technical_only else {}
+            recovery_args = {'accepted_reports': self.accepted_child_reports(cur['attempt_dir'])}
             issues += self.launcher.reconcile_attempt(cur['attempt_dir'], request_id if request_id and path != paths[0] else None, **recovery_args)
             if not technical_only:
+                if not issues:
+                    self.cleanup_accepted_reports(st)
                 child_problems, child_resource_problems = self.child_acceptance_problems(st)
                 cur['incomplete_checks'] = child_problems
                 issues += child_resource_problems
@@ -1278,6 +1387,15 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 if uncertain not in st.get('applied_commands', []) and not issues:
                     from .application import _execution_scope
                     envelope = command.get('command') or {}
+                    # A reconcile has no unconfirmed command effect to replay:
+                    # the successful observations above are its completion proof.
+                    if (command.get('action') == envelope.get('action') == 'reconcile'
+                            and envelope.get('request_id') == uncertain == command.get('id')
+                            and envelope.get('scope', {}).get('identity') == self.context.identity()
+                            and command.get('guard') == _execution_scope(self, st)
+                            and all(envelope.get('scope', {}).get(key) == command['guard'].get(key)
+                                    for key in ('generation', 'attempt'))):
+                        st.setdefault('applied_commands', []).append(uncertain)
                     # Complete only an exact, still-current stop intention. Existing
                     # journal keys prohibit replay of an unconfirmed external effect.
                     if (command.get('action') == envelope.get('action') == 'stop'

@@ -26,7 +26,7 @@ def selection(args, catalog):
     attempt = os.environ.get('TEAM_RUNNER_ATTEMPT')
     if attempt:
         ctx.check_attempt(attempt)
-        if args.cmd not in ('launch', 'messages', 'reply', 'status', 'events', 'artifacts'):
+        if args.cmd not in ('launch', 'delegate', 'messages', 'reply', 'status', 'events', 'artifacts'):
             raise ValueError('child attempt cannot control workspace lifecycle')
     return Runner(ctx)
 
@@ -94,7 +94,7 @@ def parser(json_errors=False):
         p.add_argument('--project'); p.add_argument('--workspace'); p.add_argument('--name'); p.add_argument('--path')
         p.add_argument('--orca-id'); p.add_argument('--orca-instance'); p.add_argument('--profile-file'); p.add_argument('--roles-file')
         if command == 'project': p.add_argument('--service-port', type=int)
-    for command in ('execute','run','status','operation','goals','command','pause','stop','retry','reconcile','continue-operation','reply','resolve','launch','messages','_runner','prepare-scope'):
+    for command in ('execute','run','status','operation','goals','command','pause','stop','retry','reconcile','continue-operation','reply','resolve','launch','delegate','messages','_runner','prepare-scope'):
         p = sub.add_parser(command)
         p.add_argument('--project', required=command in ('execute', 'prepare-scope')); p.add_argument('--workspace', required=command in ('execute', 'prepare-scope'))
         if command in ('status', 'operation', 'goals', 'command', 'messages', 'pause', 'stop', 'retry', 'reconcile', 'continue-operation', 'reply', 'resolve', 'prepare-scope'):
@@ -153,7 +153,13 @@ def parser(json_errors=False):
             p.add_argument('message_id'); p.add_argument('text', nargs='?'); p.add_argument('--file'); p.add_argument('--run-id')
         if command == 'resolve': p.add_argument('choice', choices=['start','skip','stop'])
         if command == 'continue-operation': p.add_argument('operation_id')
+        if command == 'delegate':
+            p.add_argument('edge')
+            p.add_argument('--spec', required=True); p.add_argument('--title', required=True)
+            p.add_argument('--request-id', required=True)
+            p.add_argument('--variant', choices=['primary', 'reserve'], default='primary'); p.add_argument('--reason')
         if command == 'launch':
+            p.add_argument('--request-id')
             from .runner_config import ROLES
             p.add_argument('role', choices=[r for r in ROLES if r != 'coordinator'])
             p.add_argument('--spec', required=True); p.add_argument('--title', required=True)
@@ -410,7 +416,7 @@ def main(argv=None):
                                               'revision': args.revision}})
             print(json.dumps(data, ensure_ascii=False))
             return _result_exit(data)
-        if args.cmd in ('status','launch','messages'):
+        if args.cmd in ('status','launch','delegate','messages'):
             return getattr(runner, 'cmd_'+args.cmd)(args) or 0
         return runner.cmd_control(args) or 0
     except ContractError as exc:

@@ -1,6 +1,6 @@
 """Generate a compact report and durably send worker_done without shell interpolation.
 
-Input JSON: {"outcome":"succeeded|failed", "summary":"...",
+Input JSON: {"outcome":"succeeded|failed|changes_requested", "summary":"...",
 "files_modified":[], "checks":[], "issues":"none", "next_step":"none"}.
 checks contains paths relative to TEAM_RUNNER_ATTEMPT, pointing to existing evidence.
 Detailed requirement matrices remain linked evidence, not repeated report prose.
@@ -28,9 +28,11 @@ def complete(payload, sender, task, dispatch, capability=None):
                   and a.get('task_id') == task and a.get('dispatch_id') == dispatch), None)
     if not agent or agent.get('role') == 'coordinator':
         raise ValueError('worker lifecycle identity mismatch')
-    if not isinstance(payload, dict) or payload.get('outcome') not in ('succeeded', 'failed'):
-        raise ValueError('outcome must be succeeded or failed')
-    if set(payload) - {'outcome', 'summary', 'files_modified', 'checks', 'issues', 'next_step'}:
+    graph = read_json(attempt / 'config.json', {}).get('version') == 3
+    outcomes = ('succeeded', 'failed', 'changes_requested') if graph else ('succeeded', 'failed')
+    if not isinstance(payload, dict) or payload.get('outcome') not in outcomes:
+        raise ValueError('invalid report outcome')
+    if set(payload) - ({'outcome', 'summary', 'files_modified', 'checks', 'issues', 'next_step'} | ({'return_edge'} if graph else set())):
         raise ValueError('unknown report fields')
     if 'summary' not in payload:
         raise ValueError('summary is required')
@@ -61,6 +63,17 @@ def complete(payload, sender, task, dispatch, capability=None):
         old = read_json(receipt)
         if old is not None and old != payload:
             raise ValueError('completion input changed; inspect existing receipt')
+        if graph:
+            from .runner_launch import Launcher
+            from .graph_dispatch import return_edge, current
+            launcher = Launcher(context)
+            current(launcher, attempt)
+            with lock(attempt / 'agents.lock'):
+                reg = launcher.registry(attempt)
+                live = next(a for a in reg['agents'] if a['id'] == agent['id'])
+                if live.get('status') not in ('active', 'released'):
+                    raise ValueError('worker has an unresolved child or unknown state')
+                return_edge(launcher, attempt, reg, live, payload)
         if old is None:
             text = '\n'.join([
                 '# Worker result',
@@ -79,7 +92,8 @@ def complete(payload, sender, task, dispatch, capability=None):
         elif not report.is_file():
             raise ValueError('completion report missing; inspect receipt')
         args = ['orchestration', 'send', '--from', sender, '--type', 'worker_done',
-                '--task-id', task, '--dispatch-id', dispatch, '--outcome', payload['outcome'],
+                '--task-id', task, '--dispatch-id', dispatch, '--outcome',
+                'failed' if payload['outcome'] == 'changes_requested' else payload['outcome'],
                 '--subject', 'Worker result', '--body', payload.get('summary', 'none'),
                 '--report-path', str(report)]
         if payload.get('files_modified'):

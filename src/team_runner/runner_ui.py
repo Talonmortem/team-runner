@@ -62,7 +62,7 @@ def make_server(catalog, port=0, *, project_id=None, instance=None, services=Non
         def scope(self):
             if project_id is None:
                 return
-            if self.path in ('/api/health', '/api/shutdown', '/api/summary'):
+            if self.path in ('/api/health', '/api/shutdown', '/api/summary', '/api/team-profiles'):
                 return
             match = re.fullmatch(r'/api/projects/([^/]+)/workspaces/([^/]+)/([^/]+(?:/[^/]+)?)', self.path)
             if not match or match[1] != project_id or match[3] in ('workspace', 'disable'):
@@ -74,7 +74,7 @@ def make_server(catalog, port=0, *, project_id=None, instance=None, services=Non
                 return False
             # Validate both IDs locally; then the project service repeats the check.
             catalog.context(match[1], match[2], allow_disabled=True)
-            if self.command == 'POST' and match[3] in ('config/capabilities', 'config', 'profile', 'execute', 'commands'):
+            if self.command == 'POST' and match[3] in ('config/capabilities', 'config', 'profile', 'execute', 'commands', 'graph-pass'):
                 return False  # Settings and cold execute use the shared local application.
             if self.command == 'GET' and (match[3] in ('summary', 'goals', 'config', 'profile') or match[3].startswith('operations/')):
                 return False  # Persisted reads never need a running service.
@@ -124,6 +124,10 @@ def make_server(catalog, port=0, *, project_id=None, instance=None, services=Non
                 if project_id is None and match:
                     self.send(200, services.summary(match[1]))
                     return
+                if self.path == '/api/team-profiles':
+                    from .team_profiles import TeamProfiles
+                    self.send(200, TeamProfiles(catalog.config_root).read())
+                    return
                 if self.proxy():
                     return
                 if self.path == '/api/projects':
@@ -158,10 +162,10 @@ def make_server(catalog, port=0, *, project_id=None, instance=None, services=Non
                     self.send(200, configuration(runner))
                 elif self.path == '/favicon.ico':
                     self.send(204, b'', 'image/x-icon')
-                elif self.path in ('/', '/app.js', '/style.css'):
+                elif self.path in ('/', '/app.js', '/graph.js', '/style.css'):
                     name = 'index.html' if self.path == '/' else self.path[1:]
                     mime = {'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8',
-                            'style.css': 'text/css; charset=utf-8'}[name]
+                            'graph.js': 'text/javascript; charset=utf-8', 'style.css': 'text/css; charset=utf-8'}[name]
                     self.send(200, (ASSETS / name).read_bytes(), mime)
                 else:
                     self.send(404, {'error': 'not found'})
@@ -206,6 +210,15 @@ def make_server(catalog, port=0, *, project_id=None, instance=None, services=Non
                         raise ValueError('request_id required; no other service arguments allowed')
                     self.send(200, services.action(match[1], match[2], data['request_id']))
                     return
+                if self.path == '/api/team-profiles':
+                    from .team_profiles import TeamProfiles
+                    scope = data.pop('scope', {})
+                    ctx = catalog.context(scope.get('project_id'), scope.get('workspace_id'))
+                    if project_id is not None and ctx.project_id != project_id:
+                        raise ValueError('project service scope violation')
+                    self.send(200, TeamProfiles(catalog.config_root).update(data,
+                        lambda value: config.validate(value, repo=ctx.repo, config_root=ctx.config_root.parent)))
+                    return
                 if self.proxy(data):
                     return
                 if self.path == '/api/projects':
@@ -230,6 +243,12 @@ def make_server(catalog, port=0, *, project_id=None, instance=None, services=Non
                     if path == '/api/disable': result = catalog.disable(ctx.project_id, ctx.workspace_id)
                     else: result = catalog.workspace(ctx.project_id, {'profile': data} if path == '/api/profile' else data, ctx.workspace_id)
                     self.send(200, result)
+                    return
+                if path == '/api/graph-pass':
+                    from .graph_dispatch import grant
+                    if set(data) != {'attempt', 'call_id', 'request_id'}:
+                        raise ValueError('attempt, call_id and request_id required')
+                    self.send(200, grant(runner.launcher, data['attempt'], data['call_id'], data['request_id']))
                     return
                 if path == '/api/config/capabilities':
                     self.send(200, configuration_capabilities(runner, data))

@@ -261,6 +261,51 @@ class CommandsV1(unittest.TestCase):
         self.assertEqual(result['status'], 'unknown')
         self.assertEqual(self.a.load_state()['control_uncertain'], command['request_id'])
 
+    def interrupted_reconcile(self):
+        command = self.command('reconcile')
+        with patch.object(self.a, 'recover', side_effect=RuntimeError('child settlement unconfirmed')):
+            result = application.submit_v1(self.a, command)
+        self.assertEqual(result['status'], 'unknown')
+        path = self.a.state_dir / 'commands' / (command['request_id'] + '.json')
+        return command, path, self.a.load_state()
+
+    def test_failed_reconcile_resolves_after_observation_without_rewriting_receipt(self):
+        command, path, state = self.interrupted_reconcile()
+        before = path.read_bytes()
+        with patch.object(self.a, 'apply_control') as apply:
+            self.a.recover(state)
+            apply.assert_not_called()
+        self.assertNotIn('control_uncertain', state)
+        self.assertIn(command['request_id'], state['applied_commands'])
+        self.assertEqual(state['recovery_issues'], [])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(application.submit_v1(self.a, command)['status'], 'unknown')
+        self.assertEqual(application.submit_v1(self.a, self.command('pause'))['status'], 'succeeded')
+
+    def test_failed_reconcile_stays_blocked_for_different_scope_or_unknown_effect(self):
+        for change in ('attempt', 'identity', 'generation', 'effect'):
+            with self.subTest(change=change):
+                self.a.save_state({'history': []})
+                command, path, state = self.interrupted_reconcile()
+                if change == 'attempt':
+                    state['current'] = {'item': 'other'}
+                if change in ('identity', 'generation'):
+                    record = read_json(path)
+                    if change == 'identity':
+                        record['command']['scope']['identity']['workspace_id'] = 'other'
+                    else:
+                        record['command']['scope']['generation'] = 'other'
+                    atomic_json(path, record)
+                before = path.read_bytes()
+                with patch('team_runner.engine.operations.reconcile',
+                           return_value=['effect unknown'] if change == 'effect' else []), \
+                        patch.object(self.a, 'apply_control') as apply:
+                    self.a.recover(state)
+                    apply.assert_not_called()
+                self.assertEqual(state['control_uncertain'], command['request_id'])
+                self.assertNotIn(command['request_id'], state.get('applied_commands', []))
+                self.assertEqual(path.read_bytes(), before)
+
     def test_http_and_cli_submit_same_envelope_returns_same_receipt(self):
         command = self.command()
         server, token = runner_ui.make_server(self.catalog, project_id=self.a.context.project_id)

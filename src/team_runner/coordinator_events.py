@@ -19,7 +19,18 @@ def capture(runner, state, now=None):
     with lock(guard):
         journal = read_json(path, {'events': [], 'notifications': []})
         known = {(e['run_id'], e['message_id']) for e in journal['events']}
+        registry = runner.launcher.registry(current['attempt_dir'])
+        graph = read_json(Path(current['attempt_dir']) / 'config.json', {}).get('version') == 3
         for message in current.get('messages', []):
+            if graph:
+                import json
+                payload = message.get('payload') or {}
+                if isinstance(payload, str):
+                    payload = json.loads(payload)
+                call = next((c for c in registry.get('graph_calls', []) if c.get('dispatch_id') == payload.get('dispatchId')), None)
+                parent = next((a for a in registry['agents'] if call and a['id'] == call['parent_agent']), None)
+                if not parent or parent.get('dispatch_id') != current['dispatch_id']:
+                    continue
             key = (message.get('run_id'), message.get('id'))
             if (key in known or not all(key) or key[0] == state.get('run_id')
                     or message.get('type') not in ('question', 'escalation', 'worker_done')):

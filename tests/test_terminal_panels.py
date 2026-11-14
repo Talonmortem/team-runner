@@ -1,4 +1,4 @@
-"""Detached live panes are restored without replaying or relaunching workers."""
+"""Background polling observes detached panes without changing Orca focus."""
 import copy
 from unittest.mock import patch
 
@@ -45,16 +45,13 @@ class TerminalPanels(Fixture):
     def switches(self):
         return [args for args, _ in self.calls if args[:2] == ('terminal', 'switch')]
 
-    def test_poll_restores_exact_live_panel_and_preserves_lifecycle_journal(self):
+    def test_poll_observes_detached_panel_without_switching_or_journaling(self):
         store.atomic_json(launch.journal(self.attempt_dir), {'prior': {'status': 'completed'}})
-        self.assertEqual(self.poll()['panel_status'], 'visible')
-        self.assertEqual(len(self.switches()), 1)
+        for _ in range(2):
+            self.assertEqual(self.poll()['panel_status'], 'orphaned')
+        self.assertEqual(self.switches(), [])
         self.assertEqual(store.read_json(launch.journal(self.attempt_dir)), {'prior': {'status': 'completed'}})
-        op = store.read_json(self.attempt_dir / 'panel-operations.json')['agent-panel-switch']
-        self.assertEqual(op['status'], 'completed')
-        self.assertEqual(op['evidence'], {'terminal': 'term', 'incarnation': 'inc', 'worktree': 'fixture'})
-        self.assertEqual(self.poll()['panel_status'], 'visible')
-        self.assertEqual(len(self.switches()), 1)
+        self.assertFalse((self.attempt_dir / 'panel-operations.json').exists())
 
     def test_visible_panel_never_changes_focus(self):
         self.terminal['orphaned'] = False
@@ -114,37 +111,26 @@ class TerminalPanels(Fixture):
             self.poll()
         self.assertEqual(self.switches(), [])
 
-    def test_unknown_switch_is_not_repeated_and_does_not_fence_worker_operations(self):
-        self.switch_result = 'lost'
-        self.assertIn('lost switch receipt', self.poll()['panel_error'])
-        launch.check_operations(self.attempt_dir)
-        self.assertNotIn('panel_error', self.poll())  # Read-only confirmation after the lost receipt.
-        self.terminal['orphaned'] = True
-        self.assertIn('restore panel manually', self.poll()['panel_error'])
-        self.assertEqual(len(self.switches()), 1)
-        self.assertEqual(store.read_json(self.attempt_dir / 'panel-operations.json')['agent-panel-switch']['status'], 'unknown')
-
-    def test_switch_receipt_requires_confirmation_and_never_steals_focus_repeatedly(self):
-        self.switch_result = 'detached'
-        self.assertIn('unconfirmed', self.poll()['panel_error'])
-        self.assertIn('restore panel manually', self.poll()['panel_error'])
-        self.assertEqual(len(self.switches()), 1)
-
-    def test_crash_after_switch_intent_never_replays_the_command(self):
-        store.atomic_json(self.attempt_dir / 'panel-operations.json', {
-            'agent-panel-switch': {'status': 'pending', 'stage': 'intent', 'request_id': 'prior',
-                                   'args': ['terminal', 'switch', '--terminal', 'term'], 'mailbox': 'mailbox'}})
-        self.assertIn('restore panel manually', self.poll()['panel_error'])
+    def test_historical_panel_operations_are_not_replayed_or_rewritten(self):
+        journal = self.attempt_dir / 'panel-operations.json'
+        for status in ('pending', 'unknown', 'completed'):
+            with self.subTest(status=status):
+                history = {'agent-panel-switch': {'status': status, 'stage': 'intent',
+                    'request_id': 'prior', 'args': ['terminal', 'switch', '--terminal', 'term'],
+                    'mailbox': 'mailbox'}}
+                store.atomic_json(journal, history)
+                self.assertEqual(self.poll()['panel_status'], 'orphaned')
+                launch.check_operations(self.attempt_dir)
+                self.assertEqual(store.read_json(journal), history)
         self.assertEqual(self.switches(), [])
-        launch.check_operations(self.attempt_dir)
 
-    def test_repeated_detachment_requires_manual_recovery(self):
-        self.poll()
+    def test_manual_reattachment_is_observed_without_automatic_switch(self):
+        self.assertEqual(self.poll()['panel_status'], 'orphaned')
+        self.terminal['orphaned'] = False
+        self.assertEqual(self.poll()['panel_status'], 'visible')
         self.terminal['orphaned'] = True
-        record = self.poll()
-        self.assertEqual(record['panel_status'], 'orphaned')
-        self.assertIn('restore panel manually', record['panel_error'])
-        self.assertEqual(len(self.switches()), 1)
+        self.assertEqual(self.poll()['panel_status'], 'orphaned')
+        self.assertEqual(self.switches(), [])
 
     def test_observe_stays_read_only_even_for_orphaned_panels(self):
         with patch.object(launch, 'orca', side_effect=self.transport):

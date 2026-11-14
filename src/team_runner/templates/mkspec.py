@@ -44,6 +44,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument('template', choices=('impl-step', 'tester-gates', 'tester-checks', 'reviewer'))
     parser.add_argument('slug')
     parser.add_argument('--role')
+    parser.add_argument('--node', help='version=3 agent ID; required for duplicate semantic roles')
     parser.add_argument('--variant', choices=('primary', 'reserve'), default='primary')
     parser.add_argument('--reason')
     parser.add_argument('pairs', nargs='*')
@@ -78,7 +79,18 @@ def main(argv: list[str]) -> int:
     if attempt:
         with open(os.path.join(attempt, "config.json"), encoding="utf-8") as snapshot:
             config = json.load(snapshot)
-        roles = config.get('reserves', {}) if args.variant == 'reserve' else config['roles']
+        if config.get('version') == 3:
+            candidates = [n for n in config['nodes'] if (n['id'] == args.node if args.node else not role or n['role'] == role)]
+            if args.node and (len(candidates) != 1 or role and candidates[0]['role'] != role):
+                raise SystemExit('node/role mismatch in attempt snapshot')
+            if role and len(candidates) != 1:
+                raise SystemExit('ambiguous or absent role; select --node ID')
+            roles = {n['id']: n['reserve' if args.variant == 'reserve' else 'primary'] for n in candidates}
+            role = candidates[0]['id'] if role or args.node else None
+        else:
+            if args.node:
+                raise SystemExit('--node requires version=3')
+            roles = config.get('reserves', {}) if args.variant == 'reserve' else config['roles']
         if role and role not in roles:
             raise SystemExit(f"role {role!r} is absent from this attempt snapshot; configure a new attempt")
         if role and not roles[role]:

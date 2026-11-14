@@ -177,8 +177,11 @@ def execute(runner, data, *, services=None, start=None, manager=None):
 
 def configuration(runner):
     """Full editable configuration and diagnostics shared by transports."""
+    from .team_graph import migrate
     return {'config': runner.load_config(runner.load_state().get('options', {}).get('config'),
                                           allow_unavailable_fast=True),
+            'graph': migrate(
+                runner.load_config(runner.load_state().get('options', {}).get('config'), allow_unavailable_fast=True)),
             'source': str(config_path(runner)), 'defaults': config.defaults(),
             'templates': [{**item, 'config': config.get_template(item['id']),
                            'available': item['id'] != 'cloudru' or config.sber_allowed(runner.repo)}
@@ -207,7 +210,7 @@ def write_configuration(runner, data):
                 raise ValueError('reset does not accept configuration fields')
             value = config.validate(config.defaults(), repo=runner.repo,
                                     config_root=runner.context.config_root.parent)
-        elif data.get('version') == 2:
+        elif data.get('version') in (2, 3):
             value = config.validate(data, repo=runner.repo, config_root=runner.context.config_root.parent)
         else:
             value = config.settings_update(data, runner.load_config(runner.load_state().get('options', {}).get('config'),

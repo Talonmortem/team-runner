@@ -8,3 +8,5 @@ dist/
 # Local generated graphs and execution evidence.
 /graphify-out/
 feat/**/evidence/
+/.playwright-cli/
+/output/

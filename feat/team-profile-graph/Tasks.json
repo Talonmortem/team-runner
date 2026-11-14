@@ -1,0 +1,57 @@
+{
+  "track": "team-profile-graph",
+  "kind": "feature",
+  "date": "2026-11-11",
+  "status": "in_progress",
+  "goals": [
+    "Именованные графовые профили v3; редактор; разрешённое вложенное делегирование и возврат на доработку"
+  ],
+  "invariants": [
+    "Immutable attempt snapshots before dispatch",
+    "Explicit workspace and registered caller; no runtime subagents",
+    "No automatic replay of unknown effects; live goals only with explicit user authorization"
+  ],
+  "queue": [
+    {
+      "id": "configuration-library",
+      "status": "completed"
+    },
+    {
+      "id": "delegation-rework",
+      "status": "completed"
+    },
+    {
+      "id": "graph-editor",
+      "status": "completed"
+    },
+    {
+      "id": "verification",
+      "status": "completed"
+    },
+    {
+      "id": "scoped-workflow-optimization",
+      "status": "in_progress",
+      "task": "Убрать повторные exploration/planning и формальную отдельную сессию внутри готового item; проверить на разрешённом OW-02 SHM."
+    }
+  ],
+  "verification": [
+    "PYTHONPATH=src python3 -m unittest discover -s tests -p test_*.py: 638 PASS in 76.312s (final code)",
+    "python3 tests/test_orca_msg.py; test_orca_recover.py; test_token_usage.py: PASS",
+    "python3 -m compileall -q src/team_runner; node --check app.js/graph.js; git diff --check: PASS",
+    "Isolated Chromium editor scenario + mouse interactions + reload: PASS; output/playwright/team-profile-graph-result.json and screenshot",
+    "Separate independent reviewer: PASS after recovery/authorization/routing/dedup corrections; final failed/succeeded acceptance check PASS",
+    "No live provider execution or registered project goals launched"
+  ],
+  "latest_attempt": {
+    "date": "2026-11-11",
+    "result": "OW-01 live accepted; user authorized workflow optimization and OW-02 only. Preserve independent tester/reviewer, runtime settings and immutable history."
+  },
+  "execution_rules": [
+    "Isolated tests only; full unittest after targeted checks",
+    "No commits or branch changes"
+  ],
+  "panel": {
+    "phase": "completed",
+    "blockers": []
+  }
+}

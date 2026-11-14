@@ -59,6 +59,7 @@ def _capture(runner):
     for key in ('attempt_dir',):
         if cur.get(key):
             paths['attempt_effects'] = runner.launcher.journal(cur[key])
+            paths['agents'] = Path(cur[key]) / 'agents.json'
     if state.get('mailbox_dir'):
         paths['mailbox_effects'] = runner.launcher.journal(state['mailbox_dir'])
     values = {name: read_json(path, {}) for name, path in paths.items()}
@@ -182,6 +183,12 @@ def summary(runner):
             observed, actions = 'stopping', ['stop']
         else:
             observed, actions = 'stopped', ['retry'] if cur.get('attempt_dir') else ['start'] if not cur else []
+    elif facts.get('agents', {}).get('graph_calls') and facts['agents'].get('fenced'):
+        block('graph_outcome_unknown', 'Исход дочернего вызова не подтверждён. Сверьте состояние или остановите цепочку.',
+              ['reconcile', 'stop'], {'issues': facts['agents'].get('recovery_issues', [])})
+    elif any(c.get('status') == 'limit' for c in facts.get('agents', {}).get('graph_calls', [])):
+        block('graph_edge_limit', 'Лимит связи исчерпан. Разрешите один проход либо остановите выполнение.',
+              ['stop'], {'calls': [c for c in facts['agents']['graph_calls'] if c.get('status') == 'limit']})
     elif cur.get('failed'):
         block('attempt_failed', 'Review the failed attempt before retrying',
               ['retry'] if not facts['runner_running'] and state.get('stop_status') == 'stopped' else ['stop'],

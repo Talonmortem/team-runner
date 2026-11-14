@@ -230,14 +230,13 @@ Reuse только implementer_standard/medium/complex и tester/tester_complex,
 
 ## Хранение и восстановление
 
-В рабочем poll runner проверяет панели своих живых агентов. При `orphaned=true`
-и подключённом доступном для записи терминале выполняет один `terminal switch`
-на терминал и подтверждает привязку через `terminal show`. Восстановление может
-переключить активную вкладку Orca. Handle, incarnation, workspace и владелец Dispatch
-должны совпадать; закрытые пользователем и завершённые терминалы не восстанавливаются.
-`panel_status`/`panel_error` сохраняются в `agents.json`, эффект — отдельно в
-`panel-operations.json`. Потерянный ответ или повторный отрыв панели требуют ручной
-проверки: команда автоматически не повторяется. `reconcile` остаётся читающим.
+В рабочем poll runner только проверяет состояние панелей своих живых агентов.
+При `orphaned=true` сохраняет `panel_status=orphaned`, не переключая активную
+вкладку и не восстанавливая панель автоматически. Открыть терминал можно вручную
+кнопкой «Открыть терминал» в панели runner. Handle, incarnation, workspace и
+владелец Dispatch проверяются; ошибки сохраняются в `panel_error` в `agents.json`.
+Старые записи `panel-operations.json` сохраняются как история и не повторяются.
+`reconcile` остаётся читающим.
 
 ### Очистка временных данных старых попыток
 
@@ -460,3 +459,7 @@ are measured separately. SHM starts with four DB shards and its retained duratio
 Optional profile `runtime.go_cache` is an absolute dedicated cache directory. The frozen attempt profile supplies both `GOCACHE` and Codex writable roots. Runner probes write access before dispatch; existing snapshots remain unchanged. Set this to the same Go build cache for sequential workers, then refresh the next attempt.
 
 Workers use `python3 -m team_runner.worker_report --help`: a short JSON result generates report metadata and sends `worker_done` using the exact assigned lifecycle IDs. Detailed evidence stays in linked files. Completion receipts prevent duplicate sends; unknown effects require reconciliation. `orca_msg send --body-file FILE` transports arbitrary message text without shell evaluation.
+
+Графовые команды: настройки открывают конфигурации v1/v2 как граф, сохранение редактора записывает v3. Один корневой координатор, произвольные агенты с повторяющимися ролями, связи delegation/rework, группы и позиции. Именованные профили общие для каталогов: `$XDG_CONFIG_HOME/team-runner/team-profiles.json`, HTTP `/api/team-profiles`. Выбор профиля меняет черновик; «Сохранить» применяет его к следующим попыткам. Снимки активных попыток не меняются.
+
+В v3 агент вызывает `team-runner delegate EDGE_ID --spec FILE --title TITLE --request-id UUID` и ждёт результат. Каждый вызов получает свежую сессию; `launch ROLE` допустим при одной подходящей исходящей связи. Исполняется один агент; предки сохраняют ожидающие сессии. CLI получает результат своей цепочки, mailbox читает только runner. Возврат через `team_runner.worker_report`: `outcome: "changes_requested"`, `return_edge: "EDGE_ID"`; связь rework должна вести к непосредственному вызывающему. Такой результат передаётся транспортом как failed и не удовлетворяет приёмке: необходима новая успешная проверка. Делегирование предку запрещено. По умолчанию у связи три прохода на попытку; повтор UUID не расходует проход повторно. Панель при исчерпании лимита предлагает один дополнительный проход или остановку. Разрешения хранятся отдельно от снимка. Неизвестные эффекты требуют reconciliation, автоматического повторного запуска нет.
