@@ -178,7 +178,8 @@ class OrcaFixture:
             if op == ('terminal', 'create'):
                 self.serial += 1
                 terminal = {'handle': 'fixture-terminal-' + str(self.serial), 'incarnationId': str(uuid.uuid4()),
-                            'ptyId': str(self.serial), 'worktreeId': self.orca_id}
+                            'ptyId': str(self.serial), 'worktreeId': self.orca_id,
+                            'tabId': str(uuid.uuid4()), 'leafId': str(uuid.uuid4())}
                 self.terminals[terminal['handle']] = terminal
                 command = shlex.split(value('--command'))
                 if len(command) > 3 and 'team_runner.runner_entry' in command:
@@ -186,14 +187,23 @@ class OrcaFixture:
                     i = command.index('team_runner.runner_entry')
                     atomic_json(command[i+1], {'nonce': command[i+2], 'terminal': terminal,
                                 'pid': os.getpid(), 'process_stamp': process_stamp(os.getpid())})
+                    atomic_json(self.root / (terminal['handle'] + '.marker.json'), command[i+1])
                 return {'terminal': terminal}
             if op == ('terminal', 'show'):
-                return {'terminal': self.terminals[value('--terminal')]}
+                return {'terminal': self.terminals.get(value('--terminal'))}
             if op == ('terminal', 'list'):
-                return {'terminals': list(self.terminals.values())}
+                return {'terminals': list(self.terminals.values()), 'truncated': False,
+                        'hostScope': {'hostIds': ['local'], 'omittedHostIds': []}}
             if op == ('terminal', 'close'):
-                self.terminals.pop(value('--terminal'), None)
-                return {}
+                handle = value('--terminal')
+                terminal = self.terminals.pop(handle)
+                marker_path = read_json(self.root / (handle + '.marker.json'))
+                if marker_path:
+                    marker = read_json(marker_path)
+                    marker['process_stamp'] = 'fixture-departed'
+                    atomic_json(marker_path, marker)
+                return {'close': {'handle': handle, 'tabId': terminal['tabId'],
+                                  'ptyKilled': True}}
             if op == ('terminal', 'wait'):
                 return {'wait': {'satisfied': True}}
             if op == ('terminal', 'read'):

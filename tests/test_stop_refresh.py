@@ -85,13 +85,16 @@ class StopRefresh(Fixture):
                 def orca(*args, **kwargs):
                     return {'terminals': []} if args[:2] == ('terminal', 'list') else data
                 with patch.object(launch, 'liveness', return_value='unverifiable'), \
-                        patch.object(launch, 'orca', side_effect=orca), patch.object(launch, 'effect') as effect:
+                        patch.object(launch, 'orca', side_effect=orca), patch.object(launch, 'effect') as effect, \
+                        patch('team_runner.runner_operations.close_terminal', return_value={}) as close:
                     self.assertEqual(launch.stop_attempt(attempt), mutation is None)
                     if mutation is None:
                         self.assertEqual([c.args[2:4] for c in effect.call_args_list],
-                                         [('orchestration', 'worker-abandon'), ('terminal', 'close')])
+                                         [('orchestration', 'worker-abandon')])
+                        self.assertEqual(close.call_args.args[3:6], ('t', 'i', 'fixture'))
                     else:
                         effect.assert_not_called()
+                        close.assert_not_called()
 
     def test_unconfirmed_stop_returns_error_and_confirmed_stop_clears_it(self):
         from team_runner.runner_ui import state_view
@@ -139,13 +142,15 @@ class StopRefresh(Fixture):
                 def orca(*args, **kwargs):
                     return {'terminals': []} if args[:2] == ('terminal', 'list') else data
                 with patch.object(launch, 'liveness', return_value='unverifiable'), \
-                        patch.object(launch, 'orca', side_effect=orca), patch.object(launch, 'effect') as effect:
+                        patch.object(launch, 'orca', side_effect=orca), patch.object(launch, 'effect') as effect, \
+                        patch('team_runner.runner_operations.close_terminal', return_value={}) as close:
                     self.assertEqual(launch.stop_attempt(attempt), mutation is None)
                     if mutation is None:
-                        self.assertEqual(effect.call_args.args[2:4], ('terminal', 'close'))
+                        self.assertEqual(close.call_args.args[3:6], ('t', 'i', 'fixture'))
                         self.assertTrue(launch.registry(attempt)['agents'][0]['terminal_closed'])
                     else:
                         effect.assert_not_called()
+                        close.assert_not_called()
 
     def test_ui_refresh_clears_old_overrides_cli_refresh_preserves_them(self):
         for saved_settings, versioned in ((False, False), (True, False), (False, True), (True, True)):
@@ -221,11 +226,13 @@ class StopRefresh(Fixture):
                     def orca(*args, **kwargs):
                         return {'terminals': []} if args[:2] == ('terminal', 'list') else data
                     with patch.object(launch, 'liveness', return_value='unverifiable'), \
-                            patch.object(launch, 'orca', side_effect=orca), patch.object(launch, 'effect') as effect:
+                            patch.object(launch, 'orca', side_effect=orca), patch.object(launch, 'effect') as effect, \
+                            patch('team_runner.runner_operations.close_terminal', return_value={}) as close:
                         self.assertEqual(launch.stop_attempt(attempt), mutation is None)
                         if mutation is None:
-                            self.assertEqual([c.args[2:4] for c in effect.call_args_list], [('terminal', 'close')])
+                            self.assertEqual(close.call_args.args[3:6], ('t', 'i', 'fixture'))
                             self.assertEqual(launch.registry(attempt)['agents'][0]['status'], 'stopped')
                         else:
                             effect.assert_not_called()
+                            close.assert_not_called()
 

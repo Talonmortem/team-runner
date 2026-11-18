@@ -54,6 +54,11 @@ def parser(json_errors=False):
     p.add_argument('--legacy-retired', action='store_true', help='include retired ~/.local/state/shm-team/runs')
     for command in ('ui', 'serve'):
         p = sub.add_parser(command); p.add_argument('--port', type=int, default=0); p.add_argument('--no-open', action='store_true')
+    p = sub.add_parser('dashboard')
+    p.add_argument('--port', type=int, default=0)
+    p.add_argument('--no-open', action='store_true')
+    p.add_argument('--enable-actions', action='store_true')
+    p.add_argument('--session-dir')
     p = sub.add_parser('events')
     p.add_argument('action', choices=['list', 'ack'])
     p.add_argument('--project'); p.add_argument('--workspace')
@@ -259,6 +264,11 @@ def main(argv=None):
                       manager.action(args.project, args.action, args.request_id or str(uuid.uuid4())))
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 1 if result.get('status') in ('error', 'unknown', 'applying') else 0
+        if args.cmd == 'dashboard':
+            from .dashboard import serve
+            serve(catalog, args.port, open_browser=not args.no_open,
+                  session_dir=args.session_dir, enable_actions=args.enable_actions)
+            return 0
         if args.cmd in ('serve','ui'):
             from .runner_ui import serve
             serve(catalog, args.port, args.cmd == 'ui' and not args.no_open)

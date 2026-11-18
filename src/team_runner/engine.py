@@ -319,6 +319,8 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         st.setdefault('mailbox_recoveries', []).append({'previous': old, 'replacement': fresh['handle'],
                                                        'run_id': st['run_id']})
         st.update(mailbox=fresh['handle'], mailbox_incarnation=fresh['incarnationId'])
+        st.pop('mailbox_close_evidence', None)
+        st.pop('mailbox_cleanup_error', None)
         self.save_state(st)
         self.log('восстановлен mailbox прежнего Run: ' + old + ' -> ' + fresh['handle'])
         return fresh
@@ -338,14 +340,21 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
 
     def ensure_run(self, st):
         mailbox = st.get('mailbox')
+        if mailbox and st.get('mailbox_close_evidence') and not st.get('run_id'):
+            for key in ('mailbox', 'mailbox_incarnation', 'mailbox_close_evidence', 'mailbox_dir', 'session_id'):
+                st.pop(key, None)
+            mailbox = None
         if mailbox:
-            try:
-                terminal = self.launcher.orca('terminal', 'show', '--terminal', mailbox)['terminal']
-            except RuntimeError as exc:
-                code = (getattr(exc, 'receipt', {}).get('error') or {}).get('code')
-                if code != 'terminal_handle_stale' or not st.get('run_id'):
-                    raise
+            if st.get('mailbox_close_evidence') and st.get('run_id'):
                 terminal = self.recover_mailbox(st)
+            else:
+                try:
+                    terminal = self.launcher.orca('terminal', 'show', '--terminal', mailbox)['terminal']
+                except RuntimeError as exc:
+                    code = (getattr(exc, 'receipt', {}).get('error') or {}).get('code')
+                    if code != 'terminal_handle_stale' or not st.get('run_id'):
+                        raise
+                    terminal = self.recover_mailbox(st)
             if terminal.get('incarnationId') != st.get('mailbox_incarnation') or terminal.get('worktreeId') != self.context.orca_id:
                 raise ValueError('runner mailbox identity changed')
         else:
@@ -368,6 +377,19 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         self.save_state(st)
         self.log(f"создан Run {run['id']}")
         return run["id"]
+
+
+    def close_main_mailbox(self, st):
+        if not st.get('mailbox') or st.get('mailbox_close_evidence'):
+            return
+        if not st.get('mailbox_dir'):
+            raise RuntimeError('runner mailbox launch journal missing')
+        handle = st['mailbox']
+        st['mailbox_close_evidence'] = operations.close_terminal(
+            self.launcher.journal(st['mailbox_dir']), 'close-' + handle, self.launcher.orca,
+            handle, st.get('mailbox_incarnation'), self.context.orca_id)
+        st.pop('mailbox_cleanup_error', None)
+        self.save_state(st)
 
 
     def wait_gate(self, st, gate_id, task_id):
@@ -587,15 +609,24 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                        for a in reg['agents'] if a.get('cleanup_error') or a.get('error')]
             details.extend(f"mailbox {r.get('run_id')}: {r['error']}" for r in reg['runs'] if r.get('error'))
             problems.extend(details or ["child resources not settled or release unconfirmed"])
-        if (not problems or done["outcome"] == "failed") and cur.get("attempt_dir"):
+        rework = (acceptance_problems and not resource_problems and done['outcome'] == 'succeeded'
+                  and cur.get('attempt_dir') and cur.get('acceptance_reworks', 0) < MAX_ACCEPTANCE_REWORKS)
+        if not rework and cur.get("attempt_dir"):
+            attempt = cur['attempt_dir']
+            if (acceptance_problems or resource_problems) and not self.settle_children(attempt):
+                # The attempt is final. Cancel unfinished Dispatches and close their owned panes.
+                if not self.launcher.stop_attempt(attempt):
+                    problems.append('final attempt cleanup unconfirmed')
             with lock(Path(cur["attempt_dir"]) / "agents.lock"):
                 reg = self.launcher.registry(cur["attempt_dir"])
                 coordinator = next((a for a in reg['agents'] if a.get('dispatch_id') == cur['dispatch_id']), None)
-                if coordinator:
+                if coordinator and coordinator.get('status') not in ('released', 'stopped'):
                     try:
                         self.launcher.release_agent(coordinator, cur["attempt_dir"],
                                                     {"dispatchId": cur["dispatch_id"], **done})
+                        coordinator.pop('cleanup_error', None)
                     except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+                        coordinator['cleanup_error'] = str(exc)
                         problems.append(str(exc))
                     self.launcher.save_registry(cur["attempt_dir"], reg)
         if not problems and getattr(args, 'goal', None) and (self.repo / args.goal / 'Tasks.json').is_file():
@@ -638,8 +669,7 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         if problems:
             cur["failed"] = True
             cur["problems"] = list(problems)
-            if (acceptance_problems and not resource_problems and done['outcome'] == 'succeeded' and cur.get('attempt_dir')
-                    and cur.get('acceptance_reworks', 0) < MAX_ACCEPTANCE_REWORKS):
+            if rework:
                 cur['acceptance_rework'] = {
                     'number': cur.get('acceptance_reworks', 0) + 1,
                     'dispatch_id': cur['dispatch_id'], 'problems': list(acceptance_problems),
@@ -1439,12 +1469,22 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 operations.continue_operation(path, request_id, self.orca)
         issues = operations.reconcile(paths[0], self.orca)
         if st.get('mailbox_dir'):
-            issues += operations.reconcile(self.launcher.journal(st['mailbox_dir']), self.orca)
+            mailbox_journal = self.launcher.journal(st['mailbox_dir'])
+            issues += operations.reconcile(mailbox_journal, self.orca)
+            close = read_json(mailbox_journal, {}).get('close-' + str(st.get('mailbox')), {})
+            if close.get('stage') == 'close_verified':
+                st['mailbox_close_evidence'] = close['result']
+                st.pop('mailbox_cleanup_error', None)
         with lock(self.state_dir / 'start.lock'):
-            startup_issues = operations.reconcile(self.launcher.journal(self.state_dir / 'startup'), self.orca)
+            startup_journal = self.launcher.journal(self.state_dir / 'startup')
+            startup_issues = operations.reconcile(startup_journal, self.orca)
             issues += startup_issues
             if not startup_issues:
                 startup = read_json(self.state_dir / 'startup.json', {})
+                close = read_json(startup_journal, {}).get(f"runner-{startup.get('nonce')}-close", {})
+                if close.get('stage') == 'close_verified':
+                    startup['close_evidence'] = close['result']
+                    startup.pop('cleanup_error', None)
                 if running(self.state_dir) and st.get('runner_status') == 'running':
                     atomic_json(self.state_dir / 'startup.json', dict(startup, status='running'))
                 elif not running(self.state_dir):

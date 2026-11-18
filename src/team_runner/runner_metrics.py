@@ -27,35 +27,79 @@ def measurement(message):
             'completed_at_ms': end}
 
 
-def dispatch_metrics(connection, repo, agent):
+class DispatchBindingError(ValueError):
+    pass
+
+
+def opencode_database():
+    return Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'opencode/opencode.db'
+
+
+def dispatch_marker(text):
+    if not isinstance(text, str) or not text.startswith(PREAMBLE):
+        return None
+    tasks = set(re.findall(r'^Your task ID is: (task_[0-9a-f]{12})$', text, re.M))
+    commands = set(re.findall(r'--from (\S+) --type worker_done\b[^\n]*?'
+                              r'--task-id (task_[0-9a-f]{12}) --dispatch-id (ctx_[0-9a-f]{12}) --outcome\b', text))
+    if len(tasks) == len(commands) == 1:
+        terminal, task, dispatch = commands.pop()
+        if task in tasks:
+            return dispatch, task, terminal
+    # Even an unrecognized new Dispatch ends the preceding interval.
+    return ()
+
+
+def dispatch_index(connection, repo, dispatch=None):
+    query = ("SELECT m.session_id, m.seq, m.data FROM session_message m "
+             "JOIN session_v2 s ON s.id=m.session_id WHERE s.directory=? "
+             "AND m.type='user' AND instr(m.data,?)>0")
+    matches = {}
+    for session, seq, raw in connection.execute(query, (str(Path(repo).resolve()), dispatch or PREAMBLE)):
+        binding = dispatch_marker(json.loads(raw).get('text'))
+        if binding:
+            matches.setdefault(binding, set()).add((session, seq))
+    return matches
+
+
+def dispatch_responses(connection, repo, agent, bindings=None):
+    """Resolve one exact injected preamble and stop at the next Dispatch."""
     dispatch, task, terminal = (agent.get(k, '') for k in ('dispatch_id', 'task_id', 'terminal'))
-    if not (re.fullmatch(r'ctx_[0-9a-f]{12}', dispatch)
-            and re.fullmatch(r'task_[0-9a-f]{12}', task) and terminal):
-        return {'status': 'unknown', 'reason': 'dispatch_identity_unavailable'}
-    # Match the injected task + terminal + dispatch, never a mention in an assistant report.
-    matches = []
-    for session, seq, raw in connection.execute(
-            "SELECT m.session_id, m.seq, m.data FROM session_message m "
-            "JOIN session_v2 s ON s.id=m.session_id WHERE s.directory=? "
-            "AND m.type='user' AND instr(m.data,?)>0", (str(Path(repo).resolve()), dispatch)):
-        message = json.loads(raw)
-        text = message.get('text', '')
-        if (text.startswith(PREAMBLE) and f'Your task ID is: {task}\n' in text
-                and f'--from {terminal} --type worker_done' in text
-                and f'--task-id {task} --dispatch-id {dispatch} --outcome' in text):
-            matches.append((session, seq))
+    if not (re.fullmatch(r'ctx_[0-9a-f]{12}', dispatch or '')
+            and re.fullmatch(r'task_[0-9a-f]{12}', task or '') and terminal):
+        raise DispatchBindingError('dispatch_identity_unavailable')
+    if bindings is None:
+        bindings = dispatch_index(connection, repo, dispatch)
+    matches = bindings.get((dispatch, task, terminal), set())
     if len(matches) != 1:
-        return {'status': 'unknown', 'reason': 'session_binding_ambiguous' if matches else 'session_not_found'}
-    session, start_seq = matches[0]
-    samples, excluded = [], 0
-    for kind, raw in connection.execute(
-            'SELECT type,data FROM session_message WHERE session_id=? AND seq>? ORDER BY seq',
+        raise DispatchBindingError('session_binding_ambiguous' if matches else 'session_not_found')
+    session, start_seq = next(iter(matches))
+    responses = []
+    incomplete = False
+    for kind, seq, raw in connection.execute(
+            'SELECT type,seq,data FROM session_message WHERE session_id=? AND seq>? ORDER BY seq',
             (session, start_seq)):
-        message = json.loads(raw)
-        if kind == 'user' and message.get('text', '').startswith(PREAMBLE):
+        try:
+            message = json.loads(raw)
+            if not isinstance(message, dict):
+                raise ValueError('expected OpenCode message object')
+        except (TypeError, ValueError):
+            # A damaged user record may hide the next Dispatch boundary.
+            incomplete = True
+            break
+        if kind == 'user' and dispatch_marker(message.get('text')) is not None:
             break  # A reused session's next Dispatch must not be charged to this one.
-        if kind != 'assistant':
-            continue
+        if kind == 'assistant':
+            responses.append((seq, message))
+    return session, responses, incomplete
+
+
+def dispatch_metrics(connection, repo, agent):
+    try:
+        session, responses, incomplete = dispatch_responses(connection, repo, agent)
+    except DispatchBindingError as exc:
+        return {'status': 'unknown', 'reason': str(exc)}
+    samples, excluded = [], int(incomplete)
+    for _, message in responses:
         sample = measurement(message)
         if sample is None:
             excluded += 1
@@ -89,8 +133,7 @@ def dispatch_metrics(connection, repo, agent):
 
 def annotate_agents(repo, agents, database=None):
     """Attach derived metrics to response objects only; never mutate snapshots or the DB."""
-    path = Path(database) if database is not None else Path(
-        os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'opencode/opencode.db'
+    path = Path(database) if database is not None else opencode_database()
     cloud = []
     for agent in agents:
         agent['token_speed'] = {'status': 'unknown', 'reason': 'runtime_not_supported'}

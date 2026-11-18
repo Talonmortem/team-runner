@@ -112,3 +112,18 @@ class Cleanup(Fixture):
    runner.cleanup_accepted_reports(st)
    runner.cleanup_accepted_reports(st)
   self.assertEqual(closed,['coord','done','failed-report'])
+
+ def test_item_settlement_closes_reserved_session_and_then_child_mailbox(self):
+  attempt,st=self.attempt()
+  child={'role':'tester','dispatch_id':'reserved','status':'active','keep_session':True}
+  store.atomic_json(attempt/'agents.json',{'agents':[child],
+                                        'runs':[{'run_id':'child','status':'ready'}]})
+  st['current']['messages']=[{'type':'worker_done','payload':{'dispatchId':'reserved','outcome':'succeeded'}}]
+  runner.save_state(st)
+  events=[]
+  def release(agent,*args):
+   events.append(agent['dispatch_id']);agent['status']='released'
+  with patch.object(launch,'release_agent',side_effect=release), \
+       patch.object(launch,'close_mailbox',side_effect=lambda attempt, run: events.append(run['run_id'])):
+   self.assertTrue(runner.settle_children(attempt))
+  self.assertEqual(events,['reserved','child'])

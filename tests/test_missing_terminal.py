@@ -91,14 +91,15 @@ class MissingTerminal(Fixture):
                 launch.confirm_missing_terminal(agent, data, attempt)
             call.assert_not_called()
 
-    def test_missing_mailbox_is_settled_without_close_replay(self):
+    def test_missing_mailbox_without_close_receipt_stays_unconfirmed(self):
         attempt, st, terminal, data, agent, op = self.missing()
-        store.atomic_json(launch.journal(attempt),{'mailbox':op})
-        run={'mailbox':terminal['handle'],'incarnation':terminal['incarnationId']}
-        with patch('team_runner.project_services.departed',return_value=True),patch.object(launch,'orca',return_value=self.listing()) as call:
-            launch.close_mailbox(attempt,run)
-        self.assertIn('close_evidence',run)
-        self.assertEqual(call.call_count,1)
+        store.atomic_json(launch.journal(attempt), {'mailbox': op})
+        run = {'mailbox': terminal['handle'], 'incarnation': terminal['incarnationId']}
+        with patch.object(launch, 'orca', return_value={}) as call:
+            with self.assertRaisesRegex(RuntimeError, 'registered terminal unavailable before close'):
+                launch.close_mailbox(attempt, run)
+        self.assertNotIn('close_evidence', run)
+        self.assertEqual([c.args[:2] for c in call.call_args_list], [('terminal', 'show')])
 
     def test_changed_boot_is_positive_even_when_pid_and_stamp_reused(self):
         with patch('team_runner.project_services.boot_id',return_value='new'),patch('team_runner.project_services.process_stamp',return_value='same'):
@@ -109,11 +110,11 @@ class MissingTerminal(Fixture):
         replacement = {**terminal, 'handle': 'replacement', 'incarnationId': 'new'}
         store.atomic_json(launch.journal(attempt), {'mailbox': op})
         run = {'mailbox': terminal['handle'], 'incarnation': terminal['incarnationId']}
-        with patch('team_runner.project_services.departed', return_value=True), patch.object(launch, 'orca', return_value=self.listing([replacement])) as call:
-            launch.close_mailbox(attempt, run)
-        self.assertIn('close_evidence', run)
-        self.assertEqual(call.call_count, 1)
-        self.assertEqual(call.call_args.args[:2], ('terminal', 'list'))
+        with patch.object(launch, 'orca', return_value={'terminal': replacement}) as call:
+            with self.assertRaisesRegex(RuntimeError, 'identity changed'):
+                launch.close_mailbox(attempt, run)
+        self.assertNotIn('close_evidence', run)
+        self.assertEqual(call.call_args.args[:2], ('terminal', 'show'))
 
     def test_reused_pane_with_old_or_incomplete_identity_refuses_proof(self):
         attempt, st, terminal, data, agent, op = self.missing()

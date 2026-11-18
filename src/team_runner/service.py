@@ -4,6 +4,8 @@ from contextlib import contextmanager
 import os
 from pathlib import Path
 import sys
+import subprocess
+import time
 import uuid
 from .catalog import Catalog
 from .runner_store import atomic_json, read_json, lock, running
@@ -110,19 +112,9 @@ def start_runner(runner, data, *, recovery=False, expected_authorization=None, e
                 verified = True
                 if st.get('goal') and st['goal'] != goal:
                     # Explicit new goal only after the old attempt settled. Preserve historical IDs.
-                    if st.get('mailbox'):
-                        from . import runner_operations as operations
-                        key = 'close-main:' + st['run_id']
-                        journal = runner.state_dir / 'operations.json'
-                        recorded = read_json(journal, {}).get(key)
-                        if not recorded:
-                            terminal = runner.orca('terminal', 'show', '--terminal', st['mailbox'])['terminal']
-                            if terminal.get('incarnationId') != st.get('mailbox_incarnation') or terminal.get('worktreeId') != ctx.orca_id:
-                                raise ValueError('previous mailbox identity unknown')
+                    if st.get('mailbox') and not st.get('mailbox_close_evidence'):
                         effect_started = True
-                        operations.mutation(journal, key, runner.orca, 'terminal', 'close', '--terminal', st['mailbox'],
-                                            evidence={'terminal':st['mailbox'], 'incarnation':st['mailbox_incarnation']})
-                        operations.terminal_evidence(read_json(journal)[key], runner.orca)
+                        runner.close_main_mailbox(st)
                     atomic_json(runner.state_dir / 'archives' / (str(uuid.uuid4()) + '.json'), st)
                     runner.save_state({'history': []})
                 elif restart_idle:
@@ -150,7 +142,8 @@ def start_runner(runner, data, *, recovery=False, expected_authorization=None, e
                                             details={'no_effect': True})
                     effect_started = True
                     terminal = runner.launcher.create_terminal(runner.state_dir / 'startup', 'runner-' + nonce,
-                                                               argv, 'team-runner ' + ctx.workspace_id, transport=runner.orca)
+                                                               argv, 'team-runner ' + ctx.workspace_id, transport=runner.orca,
+                                                               watch_runner=True)
                 result = {'status': 'starting', 'terminal': terminal['handle'], 'nonce': nonce}
                 if read_json(runner.state_dir / 'startup.json', {}).get('status') != 'running':
                     atomic_json(runner.state_dir / 'startup.json', result)
@@ -170,6 +163,48 @@ def start_runner(runner, data, *, recovery=False, expected_authorization=None, e
                     atomic_json(runner.state_dir / 'startup.json', cancelled)
                 raise
 
+
+def watch_runner_exit(runner, marker_path, nonce):
+    from . import runner_operations as operations
+    from .project_services import departed
+    marker = read_json(marker_path, {})
+    if marker.get('nonce') != nonce or not marker.get('pid') or not marker.get('process_stamp'):
+        raise RuntimeError('runner exit watcher has no process identity')
+    while not departed(marker):
+        time.sleep(.25)
+    state_dir = runner.state_dir
+    key = marker_path.name.removesuffix('.entry.json')
+    with lock(state_dir / 'start.lock'):
+        startup = read_json(state_dir / 'startup.json', {})
+        current = key == 'runner-' + str(startup.get('nonce'))
+        try:
+            journal = runner.launcher.journal(marker_path.parent)
+            terminal = marker['terminal']
+            proof = operations.close_terminal(journal, key + '-close', runner.launcher.orca,
+                                              terminal['handle'], terminal['incarnationId'], runner.context.orca_id)
+            if current:
+                startup['close_evidence'] = proof
+                startup.pop('cleanup_error', None)
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+            if current:
+                startup['cleanup_error'] = str(exc)
+            runner.log(f'runner terminal cleanup: {exc}')
+        if current:
+            atomic_json(state_dir / 'startup.json', startup)
+    if not current:
+        return
+    with lock(state_dir / 'runner.lock'), lock(state_dir / 'start.lock'):
+        if key != 'runner-' + str(read_json(state_dir / 'startup.json', {}).get('nonce')):
+            return
+        st = runner.load_state()
+        attempt = st.get('current') or {}
+        if not attempt or attempt.get('failed') or st.get('stop_status') == 'stopped':
+            try:
+                runner.close_main_mailbox(st)
+            except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+                st['mailbox_cleanup_error'] = str(exc)
+                runner.save_state(st)
+                runner.log(f'mailbox cleanup: {exc}')
 
 
 def run_process(runner, nonce):

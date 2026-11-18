@@ -206,11 +206,13 @@ class Launcher:
         return digest.hexdigest()
 
 
-    def create_terminal(self, attempt, key, command, title, mailbox=None, transport=None):
+    def create_terminal(self, attempt, key, command, title, mailbox=None, transport=None, watch_runner=False):
         # Stable nonce/path are persisted before terminal creation; never retry create.
         marker = Path(attempt) / (key + '.entry.json')
         nonce = key + ':' + str(Path(attempt).resolve())
-        wrapper = ['env', *[k + '=' + v for k, v in self.context.environment().items()], sys.executable, '-m', 'team_runner.runner_entry', str(marker), nonce, '--', *command]
+        watcher = ['--watch-runner', str(self.context.config_root), str(self.context.state_root)] if watch_runner else []
+        wrapper = ['env', *[k + '=' + v for k, v in self.context.environment().items()], sys.executable,
+                   '-m', 'team_runner.runner_entry', str(marker), nonce, *watcher, '--', *command]
         self.context.verify(transport or self.orca)
         return operations.mutation(self.journal(attempt), key, transport or self.orca, 'terminal', 'create', '--worktree', 'id:' + self.context.orca_id, '--title', title,
                       '--command', shlex.join(wrapper), mailbox=mailbox,
@@ -594,24 +596,20 @@ class Launcher:
         Never substitute close for an uncertain managed release. Only close our exact
         recorded terminal when Orca positively attests external ownership and dispatch.
         """
-        self.verify_terminal(record, data)
         resource = data.get('terminalResource') or {}
         if resource.get('ownershipState') != 'external':
             return False
-        terminal = data.get('terminal') or {}
-        if (not record.get('terminal_owned') or terminal.get('handle') != record.get('terminal')
-                or resource.get('ownerDispatchId') != record['dispatch_id']
-                or (record.get('incarnation') and terminal.get('incarnationId') != record['incarnation'])):
+        if (not record.get('terminal_owned') or not record.get('incarnation')
+                or resource.get('ownerDispatchId') != record['dispatch_id']):
             raise RuntimeError('registered terminal identity no longer matches; refusing close')
-        if record.get('attempt'):
-            self.effect(record['attempt'], record['id'] + '-close', 'terminal', 'close', '--terminal', record['terminal'],
-                   mailbox=record.get('mailbox'), evidence={'terminal': record['terminal'], 'incarnation': record['incarnation']})
-        else:
-            self.orca('terminal', 'close', '--terminal', record['terminal'], mailbox=record.get('mailbox'))
-        remaining = self.orca('terminal', 'list', mailbox=record.get('mailbox')).get('terminals')
-        if remaining is None or any(t.get('handle') == record['terminal'] for t in remaining):
-            raise RuntimeError('terminal close unconfirmed')
-        record['terminal_closed'] = True
+        if data.get('terminal'):
+            self.verify_terminal(record, data)
+        if not record.get('attempt'):
+            raise RuntimeError('registered terminal launch journal missing')
+        proof = operations.close_terminal(self.journal(record['attempt']), record['id'] + '-close', self.orca,
+                                          record['terminal'], record['incarnation'], self.context.orca_id,
+                                          mailbox=record.get('mailbox'))
+        record.update(terminal_closed=True, close_evidence=proof)
         return True
 
 
@@ -638,6 +636,8 @@ class Launcher:
         if data.get('terminalResource', {}).get('ownershipState') == 'external':
             # There is no Orca-owned release to substitute here: the launcher owns this terminal.
             self.close_registered_terminal(record, data)
+        elif record.get('terminal_owned'):
+            raise RuntimeError('registered terminal ownership unavailable')
         else:
             self.lifecycle(record, 'worker-release')
             if self.liveness(record['dispatch_id'], record.get('mailbox')) != 'exited':
@@ -749,8 +749,19 @@ class Launcher:
                 self.save_registry(attempt, reg)
                 d = a.get('dispatch_id')
                 try:
+                    ops = read_json(self.journal(attempt), {})
+                    close_key = a['id'] + '-close'
+                    close = ops.get(close_key, {})
+                    if (close.get('evidence') or {}).get('launch'):
+                        proof = operations.close_terminal(self.journal(attempt), close_key, self.orca,
+                                                          a['terminal'], a['incarnation'], self.context.orca_id,
+                                                          mailbox=a.get('mailbox'))
+                        a.update(status='stopped', terminal_closed=True, close_evidence=proof)
+                        a.pop('error', None)
+                        a.pop('cleanup_error', None)
+                        self.save_registry(attempt, reg)
+                        continue
                     if not d:
-                        ops = read_json(self.journal(attempt), {})
                         dispatch_op = ops.get(a.get('id', '') + '-dispatch')
                         if dispatch_op and dispatch_op.get('status') != 'rejected':
                             raise RuntimeError('Dispatch receipt missing; reconcile before stop')
@@ -772,9 +783,10 @@ class Launcher:
                                 self.save_registry(attempt, reg)
                                 continue
                         terminal = operations.terminal_evidence(entry, self.orca)['terminal']
-                        self.effect(attempt, a['id'] + '-close', 'terminal', 'close', '--terminal', terminal['handle'],
-                               mailbox=a.get('mailbox'), evidence={'terminal':terminal['handle'], 'incarnation':terminal['incarnationId']})
-                        a.update(status='stopped', terminal_closed=True)
+                        proof = operations.close_terminal(self.journal(attempt), a['id'] + '-close', self.orca,
+                                                          terminal['handle'], terminal['incarnationId'],
+                                                          self.context.orca_id, mailbox=a.get('mailbox'))
+                        a.update(status='stopped', terminal_closed=True, close_evidence=proof)
                         self.save_registry(attempt, reg)
                         continue
                     live = self.liveness(d, a.get('mailbox'))
@@ -866,19 +878,9 @@ class Launcher:
 
 
     def close_mailbox(self, attempt, run):
-        op = read_json(self.journal(attempt), {}).get('mailbox', {})
-        terminal = (op.get('result') or {}).get('terminal') or {}
-        if (terminal.get('handle') == run.get('mailbox') and terminal.get('incarnationId') == run.get('incarnation')):
-            self.check_operations(attempt)
-            proof = operations.missing_terminal_evidence(op, self.orca, self.context.orca_id)
-            if proof:
-                run['close_evidence'] = proof
-                return
-        terminal = self.orca('terminal', 'show', '--terminal', run['mailbox'])['terminal']
-        if not run.get('incarnation') or terminal.get('incarnationId') != run['incarnation'] or terminal.get('worktreeId') != self.context.orca_id:
-            raise RuntimeError('mailbox identity unknown/mismatch')
-        self.effect(attempt, 'mailbox-close', 'terminal', 'close', '--terminal', run['mailbox'],
-               evidence={'terminal': run['mailbox'], 'incarnation': run['incarnation']})
+        run['close_evidence'] = operations.close_terminal(
+            self.journal(attempt), 'mailbox-close', self.orca, run['mailbox'], run.get('incarnation'),
+            self.context.orca_id)
 
 
     def reconcile_attempt(self, attempt, request_id=None, accepted_reports=None):
@@ -901,8 +903,11 @@ class Launcher:
                         a.update(dispatch_id=dispatch['result']['dispatchId'], launch_confirmation=dispatch['result'])
                     closed = ops.get(a.get('id', '') + '-close', {})
                     if closed.get('status') == 'completed':
-                        operations.terminal_evidence(closed, self.orca)
-                        a.update(status='stopped' if reg.get('stop_requested') else 'released', terminal_closed=True)
+                        proof = operations.close_terminal(
+                            self.journal(attempt), a['id'] + '-close', self.orca,
+                            a['terminal'], a['incarnation'], self.context.orca_id, mailbox=a.get('mailbox'))
+                        a.update(status='stopped' if reg.get('stop_requested') else 'released',
+                                 terminal_closed=True, close_evidence=proof)
                         a.pop('error', None)
                         a.pop('cleanup_error', None)
                         continue
@@ -1000,8 +1005,9 @@ class Launcher:
                 if request['status'] != 'done' and op.get('status') == 'completed':
                     request.update(task_id=op['result']['task']['id'], status='ready')
             for run in reg['runs']:
-                if ops.get('mailbox-close', {}).get('status') == 'completed':
-                    run['status'] = 'closed'
+                if ops.get('mailbox-close', {}).get('stage') == 'close_verified':
+                    run.update(status='closed', close_evidence=ops['mailbox-close']['result'])
+                    run.pop('error', None)
                 if run.get('status') == 'creating':
                     t, r = ops.get('mailbox', {}), ops.get('child-run', {})
                     if t.get('status') == 'completed':

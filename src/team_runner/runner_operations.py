@@ -3,6 +3,7 @@ from contextvars import ContextVar
 import os
 import subprocess
 from pathlib import Path
+import time
 import uuid
 
 from .runner_store import atomic_json, lock, read_json
@@ -48,7 +49,8 @@ def _perform(path, key, op, call):
             result = call(*args, mailbox=op.get('mailbox'))
             checkpoint(op['args'][1] + ':after_effect')
             journal = read_json(path, {})
-            op.update(status='completed', stage='receipt', result=result)
+            status = 'pending' if (op.get('evidence') or {}).get('launch') else 'completed'
+            op.update(status=status, stage='receipt', result=result)
             journal[key] = op
             atomic_json(path, journal)
             checkpoint(op['args'][1] + ':after_receipt')
@@ -111,6 +113,12 @@ def reconcile(path, call):
     journal = read_json(path, {})
     issues = []
     for key, op in journal.items():
+        if (op.get('evidence') or {}).get('launch'):
+            try:
+                _verify_close(path, key, op, call)
+            except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+                issues.append(f'{key}: {exc}')
+            continue
         if op['status'] in ('completed', 'rejected'):
             continue
         if rejected_dispatch(op) or rejected_reply(op):
@@ -150,7 +158,8 @@ def terminal_evidence(op, call):
         observed = call('terminal', 'show', '--terminal', terminal['handle'], mailbox=op.get('mailbox'))['terminal']
         if any(observed.get(k) != terminal.get(k) for k in ('handle', 'incarnationId', 'ptyId', 'worktreeId')):
             raise UncertainOperation('terminal identity mismatch')
-        if not marker.get('process_stamp') or process_stamp(marker['pid']) != marker['process_stamp']:
+        if (not marker.get('pid') or not marker.get('process_stamp')
+                or process_stamp(marker['pid']) != marker['process_stamp']):
             raise UncertainOperation('launch process identity no longer live')
         return {'terminal': terminal, 'marker': marker}
     if op['args'][1] == 'close' and evidence.get('incarnation'):
@@ -160,9 +169,108 @@ def terminal_evidence(op, call):
     raise UncertainOperation('terminal effect lacks conclusive evidence')
 
 
-def missing_terminal_evidence(op, call, worktree_id):
-    """Prove disappearance of an exact local launch; never infer it from silence."""
-    from .project_services import departed
+def _close_proof(launch, terminal, call, receipt):
+    registered = (launch.get('result') or {}).get('terminal') or {}
+    if any(registered.get(k) != terminal.get(k) for k in ('handle', 'incarnationId', 'ptyId', 'worktreeId')):
+        raise UncertainOperation('close and launch identities differ')
+    close = (receipt or {}).get('close') or {}
+    acknowledged = (close.get('handle') == terminal['handle']
+                    and terminal.get('tabId') and close.get('tabId') == terminal['tabId']
+                    and close.get('ptyKilled') is True)
+    if not acknowledged:
+        raise UncertainOperation('terminal close receipt unconfirmed')
+    proof = missing_terminal_evidence(launch, call, terminal['worktreeId'], pane=terminal)
+    if proof is None:
+        raise UncertainOperation('terminal or process exit unconfirmed')
+    proof['reason'] = 'Orca acknowledged exact terminal stop; registered process departed and terminal absent from local inventory'
+    return proof
+
+
+def _verify_close(path, key, op, call):
+    if op.get('stage') == 'close_verified':
+        return op['result']
+    evidence = op['evidence']
+    with lock(str(path) + '.' + op['request_id'] + '.lock', blocking=False):
+        launch = read_json(path, {}).get(evidence['launch'], {})
+        try:
+            proof = _close_proof(launch, evidence['terminal'], call, op.get('result'))
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+            op.update(status='unknown', error=str(exc))
+            raise
+        else:
+            op.update(status='completed', stage='close_verified', result=proof)
+            op.pop('error', None)
+            return proof
+        finally:
+            journal = read_json(path, {})
+            journal[key] = op
+            atomic_json(path, journal)
+
+
+def close_terminal(path, key, call, handle, incarnation, worktree_id, *, mailbox=None):
+    """Close one journal-owned local terminal and verify the acknowledged process stop."""
+    journal = read_json(path, {})
+    if key in journal and (journal[key].get('evidence') or {}).get('launch'):
+        op = journal[key]
+        terminal = op['evidence']['terminal']
+        if (terminal['handle'], terminal['incarnationId'], terminal['worktreeId']) != (handle, incarnation, worktree_id):
+            raise RuntimeError('close receipt identity mismatch')
+        return _verify_close(path, key, op, call)
+    # Reused sessions still belong to the original create receipt.
+    for launch_key, launch in journal.items():
+        if launch.get('args', [])[:2] != ['terminal', 'create']:
+            continue
+        launch_evidence = launch.get('evidence') or {}
+        terminal = ((launch.get('result') or {}).get('terminal')
+                    or read_json(launch_evidence.get('marker', '/nonexistent'), {}).get('terminal') or {})
+        if (terminal.get('handle'), terminal.get('incarnationId'), terminal.get('worktreeId')) != (
+                handle, incarnation, worktree_id):
+            continue
+        if launch.get('status') != 'completed':
+            # A create reply can be lost before the runner exits. The nonce-bound
+            # entry marker proves creation, with no second create or close call.
+            with lock(str(path) + '.' + launch['request_id'] + '.lock', blocking=False):
+                marker = read_json(launch_evidence['marker'], {})
+                if (not launch_evidence.get('nonce') or marker.get('nonce') != launch_evidence['nonce']
+                        or marker.get('terminal') != terminal):
+                    raise RuntimeError('terminal launch marker identity mismatch')
+                launch.update(status='completed', stage='reconciled', result={'terminal': terminal})
+                launch.pop('error', None)
+                atomic_json(path, journal)
+        break
+    else:
+        raise RuntimeError('registered terminal launch receipt missing')
+    marker = _launch_marker(launch, worktree_id)
+    if marker is None:
+        raise RuntimeError('registered terminal process identity unconfirmed')
+    terminal = {**marker['terminal'], **terminal}
+    if key in journal:
+        return _close_proof(launch, terminal, call, journal[key].get('result'))
+    try:
+        observed = call('terminal', 'show', '--terminal', handle, mailbox=mailbox).get('terminal')
+    except (RuntimeError, OSError, subprocess.TimeoutExpired):
+        observed = None
+    if not observed:
+        raise UncertainOperation('registered terminal unavailable before close')
+    if any(observed.get(k) != terminal[k] for k in ('handle', 'incarnationId', 'ptyId', 'worktreeId')):
+        raise RuntimeError('registered terminal identity changed; refusing close')
+    terminal = {**terminal, **{k: observed[k] for k in ('tabId', 'leafId') if observed.get(k)}}
+    try:
+        mutation(path, key, call, 'terminal', 'close', '--terminal', handle,
+                 mailbox=mailbox, evidence={'launch': launch_key, 'terminal': terminal})
+    except UncertainOperation:
+        return _verify_close(path, key, read_json(path)[key], call)
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            return _verify_close(path, key, read_json(path)[key], call)
+        except (RuntimeError, OSError, subprocess.TimeoutExpired):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(.1)
+
+
+def _launch_marker(op, worktree_id):
     evidence = op.get('evidence') or {}
     terminal = (op.get('result') or {}).get('terminal') or {}
     if (op.get('status') != 'completed' or op.get('args', [])[:2] != ['terminal', 'create']
@@ -171,19 +279,31 @@ def missing_terminal_evidence(op, call, worktree_id):
             or not all(terminal.get(k) for k in ('handle', 'incarnationId', 'ptyId'))):
         return None
     marker = read_json(evidence['marker'], {})
-    if (marker.get('nonce') != evidence['nonce']
+    if (marker.get('nonce') != evidence['nonce'] or not marker.get('pid') or not marker.get('process_stamp')
             or any((marker.get('terminal') or {}).get(k) != terminal[k]
-                   for k in ('handle', 'incarnationId', 'ptyId', 'worktreeId'))
-            or not departed(marker)):
+                   for k in ('handle', 'incarnationId', 'ptyId', 'worktreeId'))):
+        return None
+    return marker
+
+
+def missing_terminal_evidence(op, call, worktree_id, *, pane=None):
+    """Prove disappearance of an exact local launch; never infer it from silence."""
+    from .project_services import departed
+    terminal = (op.get('result') or {}).get('terminal') or {}
+    marker = _launch_marker(op, worktree_id)
+    if not marker or not departed(marker):
         return None
     listing = call('terminal', 'list', '--worktree', 'id:' + worktree_id, mailbox=op.get('mailbox'))
     scope = listing.get('hostScope') or {}
     if (not isinstance(listing.get('terminals'), list) or listing.get('truncated') is not False
-            or scope.get('hostIds') != ['local'] or scope.get('omittedHostIds') != []):
+            or scope.get('hostIds') != ['local'] or not isinstance(scope.get('omittedHostIds'), list)
+            or 'local' in scope['omittedHostIds'] or (pane is None and scope['omittedHostIds'])):
         return None
     # Orca may reuse a pane's ptyId after reboot with a new terminal incarnation.
     if any(t.get('handle') == terminal['handle']
            or t.get('incarnationId') == terminal['incarnationId']
+           or (pane is not None and pane.get('leafId') and t.get('leafId') == pane['leafId']
+               and t.get('tabId') == pane.get('tabId'))
            or (t.get('ptyId') == terminal['ptyId']
                and not all(t.get(k) for k in ('handle', 'incarnationId')))
            for t in listing['terminals']):

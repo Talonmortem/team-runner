@@ -1,6 +1,6 @@
 """Explicit detached project services. Durable intents; never replay unknown effects."""
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 import errno
 import http.client
@@ -96,9 +96,15 @@ class ProjectServices:
     def record(self, project_id):
         return read_json(self.directory(project_id) / 'instance.json', {})
 
-    def observe(self, project_id):
-        directory = self.directory(project_id)
-        with lock(directory / 'state.lock'):
+    def observe(self, project_id, *, read_only=False):
+        if read_only:
+            from .service_manager import _held
+            directory = self.catalog.state_root / 'projects' / identifier(project_id) / 'service'
+            guard, is_held = nullcontext(), _held
+        else:
+            directory = self.directory(project_id)
+            guard, is_held = lock(directory / 'state.lock'), held
+        with guard:
             record = read_json(directory / 'instance.json', {})
             confirmed = False
             state = record.get('state', 'stopped')
@@ -111,7 +117,7 @@ class ProjectServices:
                 except ServiceUnavailable:
                     pass
             if not confirmed:
-                locked = held(directory / 'instance.lock')
+                locked = is_held(directory / 'instance.lock')
                 if not locked and (not record or state in ('stopped', 'error') or departed(record)):
                     state = 'error' if state == 'error' else 'stopped'
                     confirmed = True
@@ -119,11 +125,13 @@ class ProjectServices:
                     state = 'unknown'
                 if not confirmed:
                     error = error or 'service identity unavailable; reconcile required'
+            if read_only and record != read_json(directory / 'instance.json', {}):
+                state, confirmed, error = 'unknown', False, 'service instance changed during observation'
             return {**record, 'project_id': project_id, 'state': state, 'confirmed': confirmed,
                     'last_error': error, 'configured_port': self.catalog.read()['projects'][project_id]['service_port']}
 
-    def status(self, project_id):
-        value = self.observe(project_id)
+    def status(self, project_id, *, read_only=False):
+        value = self.observe(project_id, read_only=True) if read_only else self.observe(project_id)
         return {key: value.get(key) for key in ('project_id', 'nonce', 'pid', 'process_stamp', 'port',
                                                'configured_port', 'state', 'confirmed', 'last_error')}
 

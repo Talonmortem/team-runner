@@ -263,11 +263,12 @@ class LaunchAndStop(Fixture):
             if args[:2] == ('terminal','list'):
                 return {'terminals':[{'handle':'unrelated'}]}
             return {}
-        with patch.object(launch,'orca',side_effect=orca), patch.object(launch,'liveness',return_value='live'):
+        with patch.object(launch,'orca',side_effect=orca), patch.object(launch,'liveness',return_value='live'), \
+                patch('team_runner.runner_operations.close_terminal', return_value={}) as close:
             self.assertTrue(launch.stop_attempt(attempt))
         self.assertTrue(any(c[:4] == ('orchestration','worker-abandon','--dispatch','own') for c in calls))
-        self.assertIn(('terminal','close','--terminal','term-own'),calls)
-        self.assertNotIn(('terminal','close','--terminal','unrelated'),calls)
+        close.assert_called_once()
+        self.assertEqual(close.call_args.args[3:6], ('term-own', 'inc', 'fixture'))
 
     def test_changed_terminal_identity_is_never_closed(self):
         record = {'dispatch_id':'own','terminal':'term-own','terminal_owned':True,'incarnation':'old'}

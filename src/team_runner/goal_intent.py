@@ -125,7 +125,7 @@ def permitted(runner, generation, epoch):
                 and value.get('desired_state') == 'running')
 
 
-def authorize(runner, options, identifier, *, generation=None, epoch=None):
+def authorize(runner, options, identifier, *, generation=None, epoch=None, before_commit=None):
     """Atomically persist authorization and its receipt before any launch effects.
 
     Generation identifies a goal execution. Epoch fences cancellation within that
@@ -194,6 +194,8 @@ def authorize(runner, options, identifier, *, generation=None, epoch=None):
                   'goal': value['goal'], 'request_id': identifier, 'status': 'authorized'}
         value['requests'][identifier] = {'request': request, 'result': result}
         validate(runner, value)
+        if before_commit is not None:
+            before_commit()
         atomic_json(path, value)
         return copy.deepcopy(result)
 

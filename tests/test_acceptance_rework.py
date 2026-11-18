@@ -71,12 +71,12 @@ class AcceptanceRework(Fixture):
         self.assertEqual(repair['problems'], st['history'][0]['problems'])
         self.assertFalse(launch.registry(attempt)['fenced'])
 
-    def test_limit_preserves_coordinator_and_stops(self):
+    def test_limit_releases_coordinator_and_stops(self):
         _, st = self.coordinator()
         st['current']['acceptance_reworks'] = 2
         accepted, _, release = self.finish(st, ['still invalid'])
         self.assertFalse(accepted)
-        release.assert_not_called()
+        release.assert_called_once()
         self.assertTrue(st['current']['failed'])
         self.assertNotIn('acceptance_rework', st['current'])
 
@@ -85,7 +85,7 @@ class AcceptanceRework(Fixture):
         accepted, settle, release = self.finish(st, [], settled=False)
         self.assertFalse(accepted)
         settle.assert_called_once()
-        release.assert_not_called()
+        release.assert_called_once()
         self.assertTrue(st['current']['failed'])
         self.assertNotIn('acceptance_rework', st['current'])
 

@@ -52,7 +52,9 @@ def state_view(runner):
                          and item.get('status') == 'completed' and not tracking.item_done(item) else item
                          for item in data.get('queue', []))
     error = st.get('stop_error') or ('stop unconfirmed; inspect Orca resources' if st.get('stop_status') == 'unknown' else None)
-    error = error or st.get('last_error') or ('; '.join(st.get('recovery_issues') or [])) or None
+    error = (error or st.get('mailbox_cleanup_error')
+             or read_json(runner.state_dir / 'startup.json', {}).get('cleanup_error')
+             or st.get('last_error') or ('; '.join(st.get('recovery_issues') or [])) or None)
     if not error and cur.get('failed'):
         error = cur.get('acceptance_rework_error') or '; '.join(cur.get('problems') or []) or 'attempt failed'
     operations = [{**op, 'key': key} for path in [runner.state_dir / 'operations.json',
@@ -144,7 +146,7 @@ def execute(runner, data, *, services=None, start=None, manager=None):
     if os.environ.get('TEAM_RUNNER_ATTEMPT'):
         raise ContractError('child_lifecycle_forbidden', 'Child attempts cannot execute goals')
     if (not isinstance(data, dict) or not {'request_id', 'options'} <= set(data)
-            or set(data) - {'request_id', 'options', 'generation', 'epoch'}):
+            or set(data) - {'request_id', 'options', 'generation', 'epoch', 'scope'}):
         raise ContractError('invalid_payload', 'Expected request_id, options and optional generation/epoch')
     identifier = request_id(data['request_id'])
     generation, epoch = data.get('generation'), data.get('epoch')
@@ -170,10 +172,17 @@ def execute(runner, data, *, services=None, start=None, manager=None):
                 raise ContractError('invalid_payload', 'Invalid execute option: ' + key)
         if options.get('mode', 'auto') not in ('auto', 'confirm'):
             raise ContractError('invalid_payload', 'Invalid execute mode')
+    scope = data.get('scope')
+    if 'scope' in data:
+        if (options != {'resume': True} or not isinstance(scope, dict)
+                or set(scope) != {'identity', 'generation', 'attempt', 'revision'}
+                or scope['generation'] != generation):
+            raise ContractError('invalid_scope', 'Guarded resume requires saved options and current scope')
+        _check_identity(runner, scope['identity'])
     _check_identity(runner, runner.context.identity())
     try:
         return goal_execute.execute(runner, options, identifier, generation=generation, epoch=epoch,
-                                    services=services, start=start, manager=manager)
+                                    services=services, start=start, manager=manager, scope=scope)
     except ContractError:
         raise
     except (ValueError, TypeError, KeyError) as exc:
@@ -330,6 +339,15 @@ def _check_identity(runner, identity):
         raise ContractError('identity_mismatch', 'Command belongs to another workspace')
 
 
+def require_scope(current, scope):
+    if scope.get('identity') != current['identity']:
+        raise ContractError('identity_mismatch', 'Command belongs to another workspace')
+    if not current['confirmed'] or scope.get('revision') != current['revision']:
+        raise ContractError('stale_revision', 'Refresh status before issuing a new command')
+    if scope.get('generation') != current['generation'] or scope.get('attempt') != current['current']['attempt']:
+        raise ContractError('stale_scope', 'Command belongs to another generation or attempt')
+
+
 def _submit_v1(runner, command):
     """Durably accept a guarded control command; only the runner owner applies it."""
     from .protocol import version, request_id
@@ -361,10 +379,7 @@ def _submit_v1(runner, command):
         if (runner.state_dir / 'ui/commands' / (identifier + '.json')).exists():
             raise ContractError('request_conflict', 'request_id already used in legacy UI journal')
         current = summary(runner)
-        if not current['confirmed'] or scope['revision'] != current['revision']:
-            raise ContractError('stale_revision', 'Refresh status before issuing a new command')
-        if scope['generation'] != current['generation'] or scope['attempt'] != current['current']['attempt']:
-            raise ContractError('stale_scope', 'Command belongs to another generation or attempt')
+        require_scope(current, scope)
         state = runner.load_state()
         guard = _execution_scope(runner, state)
         if guard['generation'] != scope['generation'] or guard['attempt'] != scope['attempt']:

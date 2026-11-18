@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Team Runner</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>Team Runner</div>
+    <span id="mode" class="badge"></span>
+  </header>
+  <div class="shell">
+    <nav class="sidebar" aria-label="Проекты и checkout">
+      <h2>Проекты</h2>
+      <p id="sidebar-status" class="muted" role="status" hidden></p>
+      <div id="projects"></div>
+    </nav>
+    <main>
+      <div class="overview">
+        <div class="workspace-line"><span id="workspace-name"></span><span id="run-status" class="badge"></span></div>
+        <h1 id="goal">Выберите checkout</h1>
+        <p id="item" class="muted" hidden></p>
+        <div id="progress-row" hidden><progress id="progress" value="0" max="1" aria-label="Прогресс цели"></progress><span id="progress-count"></span></div>
+        <section id="pending-questions" aria-label="Вопросы агентов" hidden></section>
+        <div id="blocker" class="notice" hidden></div>
+        <p id="state-error" class="error" role="alert" hidden></p>
+      </div>
+      <nav class="tabs" aria-label="Сведения о checkout">
+        <button type="button" data-view="graph" aria-current="page">Попытка</button>
+        <button type="button" data-view="future">Будущий профиль</button>
+        <button type="button" data-view="diagnostics">Диагностика</button>
+        <button type="button" data-view="usage">Токены</button>
+      </nav>
+      <section id="graph-view" class="graph-view" aria-label="Граф попытки"></section>
+      <section id="future-view" class="graph-view" aria-label="Будущий профиль" hidden></section>
+      <section id="diagnostics-view" class="pane" aria-label="Диагностика" hidden></section>
+      <section id="usage-view" class="pane" aria-label="Токены" hidden>
+        <label for="period">Период истории</label>
+        <select id="period"><option value="7">7 дней</option><option value="30">30 дней</option></select>
+        <div id="usage-report"></div>
+      </section>
+    </main>
+    <aside>
+      <nav class="tabs" aria-label="Инспектор">
+        <button type="button" data-inspector="agent" aria-current="page">Агент</button>
+        <button type="button" data-inspector="hoster">Хостер</button>
+      </nav>
+      <section id="agent" class="pane" aria-label="Агент"></section>
+      <section id="hoster" class="pane" aria-label="Хостер" hidden>
+        <div class="dialog-controls">
+          <select id="dialogs" aria-label="Диалоги"></select>
+          <button type="button" id="new-dialog">Новый</button>
+        </div>
+        <div id="watch" class="muted" hidden></div>
+        <button type="button" id="cancel-watch" hidden>Остановить наблюдение</button>
+        <div id="messages" aria-label="Сообщения диалога"></div>
+        <form id="chat">
+          <label for="reply-target">Вопрос агента</label>
+          <select id="reply-target"></select>
+          <div id="reply-options" hidden></div>
+          <label for="chat-text">Сообщение</label>
+          <textarea id="chat-text" rows="3" maxlength="32000" placeholder="Покажи отчёт или понаблюдай"></textarea>
+          <button type="submit" id="send">Отправить</button>
+        </form>
+        <p id="chat-status" role="status" hidden></p>
+      </section>
+    </aside>
+  </div>
+</body>
+</html>

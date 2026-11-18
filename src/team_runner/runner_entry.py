@@ -2,6 +2,7 @@
 """Terminal-side receipt before exec. Survives a lost terminal-create response."""
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 from .runner_store import atomic_json
@@ -24,7 +25,19 @@ def boot_id():
 
 def main():
     from .orca import call
+    if sys.argv[1] == '--watch':
+        from .engine import Runner
+        from .catalog import Catalog
+        from .service import watch_runner_exit
+        marker, nonce, config_root, state_root = sys.argv[2:]
+        context = Catalog(config_root, state_root).context(os.environ['TEAM_RUNNER_PROJECT'],
+                                                            os.environ['TEAM_RUNNER_WORKSPACE'])
+        watch_runner_exit(Runner(context), Path(marker), nonce)
+        return
     path, nonce, *command = sys.argv[1:]
+    watcher_roots = []
+    if command[:1] == ['--watch-runner']:
+        watcher_roots, command = command[1:3], command[3:]
     if command and command[0] == '--':
         command.pop(0)
     handle = os.environ.get('ORCA_TERMINAL_HANDLE')
@@ -40,8 +53,13 @@ def main():
     if terminal.get('handle') != handle or not terminal.get('incarnationId') or terminal.get('worktreeId') != os.environ.get('ORCA_WORKTREE_ID'):
         raise RuntimeError('terminal identity unavailable')
     atomic_json(path, {'nonce': nonce, 'terminal': {k: terminal.get(k) for k in
-                ('handle', 'incarnationId', 'ptyId', 'worktreeId')},
+                ('handle', 'incarnationId', 'ptyId', 'worktreeId', 'tabId', 'leafId')},
                 'pid': os.getpid(), 'process_stamp': process_stamp(os.getpid()), 'boot_id': boot_id()})
+    if watcher_roots:
+        with (Path(path).parent.parent / 'runner.log').open('a') as log:
+            subprocess.Popen([sys.executable, '-m', 'team_runner.runner_entry', '--watch', path, nonce,
+                              *watcher_roots], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                             start_new_session=True, close_fds=True)
     os.execvpe(command[0], command, os.environ)
 
 

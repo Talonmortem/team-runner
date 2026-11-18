@@ -203,7 +203,7 @@ def _advance(runner, shared, services, start, fresh, manager):
             _unknown(shared, 'Runner launch outcome is unconfirmed')
 
 
-def execute(runner, options, identifier, *, generation=None, epoch=None, services=None, start=None, manager=None):
+def execute(runner, options, identifier, *, generation=None, epoch=None, services=None, start=None, manager=None, scope=None):
     """Authorize, ensure a service, and accept one launch per generation/epoch.
 
     A repeat observes the same effect journal. Concurrent identical cold requests
@@ -215,6 +215,10 @@ def execute(runner, options, identifier, *, generation=None, epoch=None, service
     command = {'schema_version': 1, 'request_id': identifier, 'action': 'execute',
                'scope': {'identity': runner.context.identity(), 'generation': generation,
                          'epoch': epoch, 'attempt': None}, 'payload': copy.deepcopy(options)}
+    if scope is not None:
+        if options != {'resume': True} or scope.get('generation') != generation:
+            raise ContractError('invalid_scope', 'Guarded execute requires resume with the observed generation')
+        command['scope'].update(copy.deepcopy(scope))
     if start is None:
         from .service import start_runner
         start = start_runner
@@ -232,6 +236,8 @@ def execute(runner, options, identifier, *, generation=None, epoch=None, service
         record = _read(runner, path)
         if record and record.get('command') != command:
             raise ContractError('request_conflict', 'request_id already used for another command')
+        if record and scope is not None:
+            return lookup(runner, identifier)
         if record and record['status'] in _RECEIPT_TERMINAL:
             return _result(record)
         if record and record.get('authorization', {}).get('service_epoch'):
@@ -247,17 +253,33 @@ def execute(runner, options, identifier, *, generation=None, epoch=None, service
                     _merge(record, previous_shared)
                     atomic_json(path, record)
                     return _result(record)
-        if record is None:
-            # This reservation precedes waiting for another execute and goal
-            # authorization. A later manual service stop invalidates its epoch.
+        def reserve():
+            nonlocal record
             reservation = service_intent.reserve(catalog, ctx.project_id, identifier, command)
             record = {'schema_version': 1, 'id': identifier, 'action': 'execute', 'command': command,
                       'service_reservation': reservation, 'status': 'pending', 'result': None, 'error': None}
             atomic_json(path, record)
-        elif 'service_reservation' not in record:
+
+        def guarded_reservation():
+            # Recheck under the goal-intent and execute locks before our own
+            # reservation/journal changes the revision.
+            from .application import require_scope, summary
+            current = summary(runner)
+            require_scope(current, scope)
+            if current['desired_state'] != 'paused' or {'action': 'start'} not in current['available_actions']:
+                raise ContractError('resume_unavailable', 'Resume requires a paused execution ready to start')
+            reserve()
+
+        if record is None and scope is None:
+            # Preserve the service epoch from before waiting for execute.
+            reserve()
+        elif record is not None and 'service_reservation' not in record:
             raise ContractError('service_resume_required', 'Execute predates service authorization; explicit migration required')
         with lock(runner.state_dir / 'execute.lock'):
-            auth = goal_intent.authorize(runner, options, identifier, generation=generation, epoch=epoch)
+            auth = goal_intent.authorize(runner, options, identifier, generation=generation, epoch=epoch,
+                                         before_commit=guarded_reservation if scope is not None else None)
+            if record is None:
+                raise ContractError('request_conflict', 'Authorization already exists for this UUID')
             record['authorization'] = auth
             atomic_json(path, record)
             from .goal_completion import read as completed
