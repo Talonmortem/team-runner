@@ -39,6 +39,29 @@ class Recovery(unittest.TestCase):
         self.supervisor.tick(self.runner)
         return read_json(self.path / 'recovery.json')
 
+    def test_dead_owner_deferral_preserves_attempt_incident_and_check_budget(self):
+        from team_runner.memory_admission import WaitingMemory
+        self.runner.launcher.resume_ready_launches.side_effect = WaitingMemory({'reason': 'low_available_memory'})
+        self.runner.launcher.liveness.return_value = 'live'
+        self.supervisor.tick(self.runner)
+        path = self.path / 'recovery.json'
+        initial = read_json(path)
+        for _ in range(8):
+            self.now += 2
+            self.supervisor.tick(self.runner)
+        waiting = read_json(path)
+        self.assertEqual(waiting['status'], 'waiting_memory')
+        self.assertEqual(waiting['incident_id'], initial['incident_id'])
+        self.assertEqual(waiting['target'], initial['target'])
+        self.assertEqual(waiting['checks'], 0)
+        self.runner.apply_control.assert_not_called()
+        self.start.assert_not_called()
+        self.runner.launcher.resume_ready_launches.side_effect = None
+        self.now += 2
+        self.supervisor.tick(self.runner)
+        self.start.assert_called_once()
+        self.assertEqual(read_json(path)['checks'], 1)
+
     def test_runner_death_resumes_same_attempt(self):
         journal = self.check()
         self.start.assert_called_once_with(self.runner, {'resume': True}, recovery=True)
@@ -427,6 +450,12 @@ class Recovery(unittest.TestCase):
 
 
 class RealRunnerRecovery(unittest.TestCase):
+    def setUp(self):
+        from memory_fixtures import isolated_admission
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        isolated_admission(self, directory.name)
+
     def test_live_owner_recovers_ready_terminal_without_second_creation(self):
         from team_runner.catalog import Catalog
         from team_runner.engine import Runner

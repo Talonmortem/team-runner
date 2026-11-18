@@ -17,6 +17,7 @@ from team_runner.runner_store import atomic_json, read_json, lock
 from team_runner import runner_ui, runner_config
 from team_runner.cli import main
 from team_runner.service import start_runner
+from memory_fixtures import isolated_admission
 from runner_browser_fixture import OrcaFixture, prepare_checkout
 
 
@@ -25,6 +26,7 @@ class Platform(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        self.proc, self.admission = isolated_admission(self, self.root)
         self.catalog = Catalog(self.root/'config', self.root/'state')
         self.p1 = self.catalog.project('Alpha')['id']
         self.p2 = self.catalog.project('Sber fixture')['id']

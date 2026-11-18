@@ -23,13 +23,18 @@ from types import SimpleNamespace
 TEAM = Path(__file__).resolve().parents[1] / 'src/team_runner'
 sys.path.insert(0, str(TEAM.parent))
 sys.path.insert(0, str(TEAM))
-from team_runner import runner_config, runner_ui, application
+from team_runner import runner_config, runner_ui, application, memory_admission
 from team_runner.engine import Runner
 from team_runner.catalog import Catalog
 from team_runner.runner_store import atomic_json, lock, read_json, running
 from team_runner.runner_launch import Launcher
 from team_runner.project_services import ProjectServices, run_service, departed
 from team_runner.runner_entry import process_stamp, boot_id
+
+
+class FixtureMemoryQueue(memory_admission.MemoryQueue):
+    def metrics(self):
+        return {'some_avg60': 0, 'full_avg60': 0}
 
 
 def fixture_environment(root):
@@ -326,6 +331,8 @@ def main():
     parser.add_argument('--port', type=int, default=0, help='isolated panel port for restart scenarios')
     for name in ('project','workspace','nonce'): parser.add_argument('--'+name)
     args = parser.parse_args()
+    memory_admission.queue = FixtureMemoryQueue(args.root / 'fixture-admission',
+        clock=lambda: time.monotonic() * 10, sleep=lambda delay: time.sleep(delay / 10))
     cat = Catalog(args.root / 'config', args.root / 'state')
     if args.runner:
         from team_runner.service import run_process

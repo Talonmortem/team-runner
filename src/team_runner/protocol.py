@@ -79,7 +79,7 @@ def _capture(runner):
     goal = values['intent'].get('goal') or state.get('goal')
     if goal:
         goal_dir = (runner.repo / goal).resolve()
-        tracking_root = (runner.repo / runner.attempt_profile()['tracking_root']).resolve()
+        tracking_root = (runner.repo / runner.attempt_profile(snapshot=state)['tracking_root']).resolve()
         if not goal_dir.is_relative_to(tracking_root):
             raise ContractError('invalid_goal', 'Goal is outside tracking root')
         data = read_json(goal_dir / 'Tasks.json')
@@ -116,6 +116,8 @@ def summary(runner):
     confirmed = first == facts
     state, intent = facts['state'], facts['intent']
     cur = state.get('current') or {}
+    from .memory_admission import view as memory_view
+    memory = memory_view(runner.state_dir, state)
     recovery_fact = facts['recovery']
     if recovery_fact.get('target') and recovery_fact['target'] != attempt_identity(state):
         recovery_fact = {}  # Keep the old incident as history, not a blocker for a new attempt.
@@ -231,6 +233,8 @@ def summary(runner):
     elif limited_calls and not waiting_for_pass:
         block('graph_edge_limit', 'Лимит связи исчерпан. Разрешите один проход либо остановите выполнение.',
               ['stop'], {'calls': limited_calls})
+    elif memory and desired == 'running':
+        observed, actions = 'waiting_memory', ['pause', 'stop']
     elif not facts['runner_running'] and facts['startup'].get('status') == 'starting' and desired == 'running':
         observed, actions = 'starting', ['stop']
     elif not facts['runner_running'] and state.get('goal') and desired == 'running':
@@ -287,7 +291,7 @@ def summary(runner):
     return {'autonomy': autonomy_status, 'schema_version': SCHEMA_VERSION, 'identity': runner.context.identity(),
             'revision': digest(facts), 'generation': intent.get('generation'), 'epoch': intent.get('epoch'),
             'goal': intent.get('goal') or state.get('goal'), 'desired_state': desired,
-            'observed_state': observed, 'confirmed': confirmed,
+            'observed_state': observed, 'confirmed': confirmed, 'waiting_memory': memory,
             'current': {'item': cur.get('item'), 'attempt': attempt_identity(state)},
             'progress': progress, 'final_acceptance': final, 'blocker': blocker,
             'available_actions': [{'action': action} for action in actions],

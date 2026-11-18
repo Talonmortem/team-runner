@@ -153,7 +153,7 @@ function text(id, value) {if ($(id).textContent !== value) $(id).textContent = v
 const storageFaults = new Set();
 const summaries = new Map(), workspaceDrafts = new Map(), refreshing = new Set(), sending = new Set();
 const actionNames = new Set(['start', 'pause', 'stop', 'retry', 'reply', 'resolve', 'reconcile', 'continue-operation', 'service-reconcile']);
-const states = {idle:'Не запущена', starting:'Запускается', running:'Выполняется', pausing:'Пауза после пункта', paused:'Приостановлена', stopping:'Останавливается', stopped:'Остановлена', needs_action:'Нужно решение', unconfirmed:'Не подтверждено', recovering:'Восстанавливается', waiting:'Ожидает проверки', failed:'Ошибка', unknown:'Исход неизвестен', completed:'Финальная приёмка пройдена', queue_completed:'Очередь выполнена'};
+const states = {idle:'Не запущена', starting:'Запускается', running:'Выполняется', pausing:'Пауза после пункта', paused:'Приостановлена', stopping:'Останавливается', stopped:'Остановлена', needs_action:'Нужно решение', unconfirmed:'Не подтверждено', recovering:'Восстанавливается', waiting:'Ожидает проверки', waiting_memory:'Ожидает запуска агента', failed:'Ошибка', unknown:'Исход неизвестен', completed:'Финальная приёмка пройдена', queue_completed:'Очередь выполнена'};
 function validSummary(value, target) {
   const parts = target.split('/'), p = value?.progress, c = value?.current, identity = value?.identity;
   const expected = projects[parts[1]]?.workspaces?.[parts[3]];
@@ -325,12 +325,25 @@ function renderActions(target = selected) {
   $('config-panel').disabled = !ready || loadedTarget !== target || sending.has(target + ':configure') || !!unresolved(target, 'configure');
 }
 let currentDetail = null;
+function memoryWaitText(wait) {
+  const reasons = {low_available_memory:'мало доступной памяти', high_memory_psi:'высокий PSI памяти',
+    launch_in_progress:'запускается другой агент', launch_cooldown:'пауза между запусками', fifo_queue:'очередь запуска'};
+  const metrics = wait.metrics || {};
+  const details = [wait.reason.split(', ').map(r => reasons[r] || r).join(', '), Math.round(wait.wait_seconds) + ' с'];
+  if (metrics.available_kib != null)
+    details.push('доступно ' + Math.round(metrics.available_kib / 1024) + ' МиБ из ' + Math.round(metrics.total_kib / 1024) + ' МиБ');
+  if (metrics.some_avg60 != null) details.push('PSI some ' + metrics.some_avg60 + '%');
+  if (metrics.full_avg60 != null) details.push('PSI full ' + metrics.full_avg60 + '%');
+  if (wait.diagnostic) details.push('метрики памяти недоступны');
+  return details.join(' · ');
+}
 function renderSummary(view, target) {
   const goalState = !view.goal && view.observed_state === 'paused' ? 'Не запущена' : states[view.observed_state];
   text('goal-state', view.autonomy?.waiting_for_pass ? 'Ожидается автоматическое разрешение' : goalState);
   const noGoals = loadedTarget === target && !$('goal').options.length;
   const attempt = currentDetail?.state?.current?.attempt;
   $('status').textContent = `${view.goal || (noGoals ? 'Нет целей в tracking root. Проверьте профиль каталога в настройках.' : 'Выберите цель для запуска')} · ${view.current.item || 'Нет текущего пункта'}${view.current.attempt ? ' · попытка ' + (attempt || 'подготовлена') : ''}`;
+  if (view.waiting_memory) $('status').textContent += ' · ' + memoryWaitText(view.waiting_memory);
   if (view.goal && [...$('goal').options].some(o => o.value === view.goal)) $('goal').value = view.goal;
   $('goal').disabled = !!view.goal || !view.confirmed;
   const p = view.progress; $('goal-progress').max = Math.max(1,p.total); $('goal-progress').value = p.completed;
@@ -340,7 +353,7 @@ function renderSummary(view, target) {
   $('decision').hidden = !view.blocker && !pendingUnknown && !allowed('retry',target);
   $('decision-diagnostics').hidden = !view.blocker || ['answer_required','confirmation_required','attempt_failed'].includes(view.blocker.code);
   $('blocker').textContent = view.blocker ? `${view.blocker.message} (${view.blocker.code})` : pendingUnknown ? 'Исход запроса не подтверждён. Проверьте его результат; автоматический повтор запрещён.' : allowed('retry',target) ? 'Попытка остановлена. Подготовьте повтор, если хотите продолжить.' : '';
-  $('last-action').textContent = view.recovery ? `Восстановление: ${{observing:'наблюдение',waiting:'ожидание проверки',recovering:'в работе',needs_action:'нужно решение',disabled:'выключено'}[view.recovery.status] || view.recovery.status || 'нет данных'}${currentDetail?.recovery?.action ? ' · последнее действие: ' + currentDetail.recovery.action : ''}${view.recovery.next_check ? ' · следующая проверка ' + new Date(view.recovery.next_check * 1000).toLocaleString() : ''}` : '';
+  $('last-action').textContent = view.recovery ? `Восстановление: ${{observing:'наблюдение',waiting:'ожидание проверки',recovering:'в работе',waiting_memory:'очередь запуска агента',needs_action:'нужно решение',disabled:'выключено'}[view.recovery.status] || view.recovery.status || 'нет данных'}${currentDetail?.recovery?.action ? ' · последнее действие: ' + currentDetail.recovery.action : ''}${view.recovery.next_check ? ' · следующая проверка ' + new Date(view.recovery.next_check * 1000).toLocaleString() : ''}` : '';
   renderActions(target); renderRequests(target);
 }
 function keepFocus(container, render) {
@@ -402,7 +415,7 @@ function renderDetails(v, target) {
   text('autonomy-budget', Object.entries(autonomy.budgets || {}).map(([edge,b]) => b.limit === null ? `${edge}: использовано ${b.used}, без лимита` : `${edge}: использовано ${b.used}/${b.limit}, осталось ${b.remaining}`).join(' · ') || 'Дополнительные проходы не использованы');
   const network = v.network || {sessions:[]};
   const next = network.next_operation;
-  text('wait-reason', network.sessions.find(s => s.status === 'needs_action')?.reason || `Текущее состояние: ${waitLabels[v.time?.last?.kind] || 'неизвестно'}`);
+  text('wait-reason', v.waiting_memory ? memoryWaitText(v.waiting_memory) : network.sessions.find(s => s.status === 'needs_action')?.reason || `Текущее состояние: ${waitLabels[v.time?.last?.kind] || 'неизвестно'}`);
   text('next-operation', next ? `Следующая операция: ${next.action === 'replace' ? 'замена сессии' : 'продолжение сессии'}${next.at ? ' · ' + new Date(next.at * 1000).toLocaleString() : ' · в очереди владельца runner'}` : 'Автоматическая операция не запланирована');
   text('time-summary', Object.entries(v.time?.seconds || {}).map(([key,seconds]) => `${waitLabels[key] || key}: ${Math.round(seconds)} с`).join(' · '));
   text('state-time', JSON.stringify(v.time || {}, null, 2));

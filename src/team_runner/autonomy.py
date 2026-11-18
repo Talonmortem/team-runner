@@ -113,7 +113,7 @@ def grant(runner, attempt, call_id):
     graph.current(runner.launcher, attempt)
     with lock(Path(attempt) / 'agents.lock'):
         reg = runner.launcher.registry(attempt)
-        call = next((c for c in reg.get('graph_calls', []) if c['id'] == call_id), None)
+        call = graph.delegation_request(reg, call_id)
         if not call or reg.get('fenced') or reg.get('stop_requested'):
             return None
         from .event_scope import pending
@@ -151,7 +151,7 @@ def grant(runner, attempt, call_id):
             if identifier not in grants:
                 call.pop('autonomy_blocker', None)
                 grants[identifier] = copy.deepcopy(grant)
-                graph.take_pass(reg, graph.snapshot(runner.launcher, attempt), call)
+                graph.grant_pass(reg, graph.snapshot(runner.launcher, attempt), call)
                 runner.launcher.save_registry(attempt, reg)
             return copy.deepcopy(grants[identifier])
 

@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 import uuid
 
+from memory_fixtures import isolated_admission
 from team_runner.catalog import Catalog
 from team_runner.infra_observer import Observer, digest, file_digest
 from team_runner.observer_workflow import Workflow, ObserverLauncher
@@ -74,6 +75,7 @@ class ObserverTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        self.proc, self.admission = isolated_admission(self, self.root)
         repo = self.root / 'runner'; repo.mkdir()
         subprocess.run(['git', 'init', '-q', str(repo)], check=True)
         marker = repo / 'src/team_runner/infra_observer.py'; marker.parent.mkdir(parents=True); marker.write_text('# fixture')
@@ -162,11 +164,43 @@ class ObserverTests(unittest.TestCase):
         self.fixture.write_text('changed after result report\n')
         self.assertEqual(self.advance(1)['status'], 'blocked')
 
+    def test_candidate_wait_keeps_stage_and_attempt_budget(self):
+        self.advance(1)
+        self.proc.psi(some=5)
+        waiting = self.advance(3)
+        attempt = waiting['attempt']
+        self.assertEqual(waiting['stage'], 'candidate')
+        self.assertEqual(waiting['attempts'], 1)
+        self.assertNotIn('candidate', waiting['stages'])
+        self.assertEqual(self.launcher.launches, ['diagnose'])
+        self.assertEqual(self.admission.view(self.launcher.context.state_dir, attempt)['reason'], 'high_memory_psi')
+        self.command('pause')
+        self.assertIsNone(self.admission.view(self.launcher.context.state_dir, attempt))
+        self.proc.psi()
+        self.command('start')
+        active = self.advance(2)
+        self.assertEqual(active['attempt'], attempt)
+        self.assertEqual(active['attempts'], 1)
+        self.assertEqual(self.launcher.launches, ['diagnose', 'candidate'])
+
     def test_stop_after_apply_still_independently_confirms_result(self):
         self.advance(7)
         self.command('stop')
         self.assertEqual(self.advance(2)['status'], 'closed')
         self.assertEqual(self.launcher.launches[-1], 'result')
+
+    def test_stop_cancels_memory_wait_for_post_apply_result(self):
+        self.advance(7)
+        self.proc.memory(0)
+        waiting = self.advance(1)
+        self.assertTrue(waiting['result_memory_deferred'])
+        self.command('stop')
+        self.assertIsNone(self.admission.view(self.launcher.context.state_dir, waiting['attempt']))
+        self.proc.memory()
+        self.assertEqual(self.advance(2)['status'], 'checking_result')
+        self.assertNotIn('result', self.launcher.launches)
+        self.command('start')
+        self.assertEqual(self.advance(3)['status'], 'closed')
 
     def test_repeated_command_id_conflicts_and_stale_scope(self):
         scope = self.observer.scope(); request = uid()

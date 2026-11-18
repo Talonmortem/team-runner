@@ -3,12 +3,14 @@
 Only Runner consumes mailboxes. A blocked CLI observes its persisted call result.
 """
 import copy
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
 import time
 import uuid
 
+from . import memory_admission
 from .protocol import request_id
 from .runner_store import lock, read_json
 from .team_graph import node
@@ -43,10 +45,13 @@ def current(launcher, attempt, reconciled_control=None):
 
 def execution_allowed(launcher, attempt, expected, reconciled_control=None):
     try:
-        current(launcher, attempt, reconciled_control)
+        if current(launcher, attempt, reconciled_control).get('paused'):
+            return False
         intent = read_json(launcher.context.state_dir / 'goal-intent.json', {})
         actual = {k: intent.get(k) for k in ('generation', 'epoch')}
-        return actual == expected and (not intent or intent.get('desired_state') == 'running')
+        desired = (intent.get('desired_state') if intent else
+                   read_json(launcher.context.state_dir / 'recovery-settings.json', {}).get('intent', 'running'))
+        return actual == expected and desired == 'running'
     except (ValueError, RuntimeError):
         return False
 
@@ -97,15 +102,21 @@ def guard(launcher, attempt, reg, record):
         raise RuntimeError('another agent or unknown outcome blocks delegation')
 
 
+def pass_available(reg, edge, call_id):
+    reserved = reg.get('granted_delegations', {})
+    extra = sum(g['edge_id'] == edge['id'] and (g['call_id'] == call_id or g['call_id'] not in reserved)
+                for g in reg.get('graph_grants', {}).values())
+    return reg.get('edge_passes', {}).get(edge['id'], 0) < edge['max_passes'] + extra
+
+
 def take_pass(reg, cfg, call):
     if call.get('pass_taken'):
         return True
     edge = next(e for e in cfg['edges'] if e['id'] == call['edge_id'])
-    used = reg.setdefault('edge_passes', {})
-    extra = sum(g['edge_id'] == edge['id'] for g in reg.get('graph_grants', {}).values())
-    if used.get(edge['id'], 0) >= edge['max_passes'] + extra:
+    if not pass_available(reg, edge, call['id']):
         call['status'] = 'limit'
         return False
+    used = reg.setdefault('edge_passes', {})
     used[edge['id']] = used.get(edge['id'], 0) + 1
     call.update(pass_taken=True, status='pending')
     return True
@@ -119,47 +130,110 @@ def delegate(launcher, attempt, edge_id, spec, title, state_dir, identifier,
     launcher.validate_variant(variant, reason, None)
     with lock(attempt / 'agents.lock'):
         reg = launcher.registry(attempt)
-        parent = caller(launcher, attempt, reg)
-        edge = next((e for e in cfg['edges'] if e['id'] == edge_id and e['type'] == 'delegation'), None)
-        if not edge or edge['source'] != parent.get('node_id'):
-            raise ValueError('edge is not permitted for caller')
-        target = node(cfg, edge['target'])
-        if target['id'] in {a.get('node_id') for a in ancestors(reg, parent)}:
-            raise ValueError('cannot delegate to a waiting ancestor; use a rework edge')
-        settings = target['reserve' if variant == 'reserve' else 'primary']
-        if settings is None:
-            raise ValueError('reserve absent from snapshot')
-        launcher.preflight(settings)
-        params = dict(parent_agent=parent['id'], edge_id=edge_id, spec=spec, title=title,
-                      variant=variant, reason=reason)
-        call = next((c for c in reg.get('graph_calls', []) if c['id'] == identifier), None)
-        if call and call['params'] != params:
-            raise ValueError('request_id already used for another delegation')
-        if call and call['status'] in TERMINAL:
+        call, edge, target, settings = _delegation(launcher, attempt, reg, cfg, edge_id, spec, title,
+                                                     identifier, variant, reason)
+        if call['status'] in (*TERMINAL, 'running'):
             return copy.deepcopy(call)
-        if reg.get('fenced') or reg.get('stop_requested'):
-            raise RuntimeError('attempt fenced; reconcile first')
-        launcher.check_operations(attempt)
-        if call is None:
-            if parent['status'] != 'active':
-                raise RuntimeError('parent already has an unresolved child')
-            if any(a['id'] not in {x['id'] for x in ancestors(reg, parent)}
-                   and a.get('status') not in ('released', 'stopped', 'superseded') for a in reg['agents']):
-                raise RuntimeError('another agent blocks delegation')
-            call = dict(id=identifier, params=params, parent_agent=parent['id'], edge_id=edge_id,
-                        target=target['id'], kind='delegation', status='pending',
-                        authorization={k: read_json(launcher.context.state_dir / 'goal-intent.json', {}).get(k) for k in ('generation', 'epoch')})
-            reg.setdefault('graph_calls', []).append(call)
-            parent.update(status='waiting_child', waiting_call=identifier)
-        if not execution_allowed(launcher, attempt, call['authorization']):
-            raise RuntimeError('goal authorization changed before delegation')
-        if not take_pass(reg, cfg, call):
+        if not call.get('pass_taken') and not pass_available(reg, edge, identifier):
+            _reserve_call(reg, call)
+            call['status'] = 'limit'
             launcher.save_registry(attempt, reg)
             return copy.deepcopy(call)
-        launcher.save_registry(attempt, reg)
+        continuation = next((a.get('terminal') for a in reg['agents']
+                             if a['id'] == call.get('child_agent') and a['status'] == 'ready'), None)
+        authorization = call['authorization']
+    permitted = lambda: execution_allowed(launcher, attempt, authorization)
+    admission = (nullcontext() if continuation else memory_admission.queue.hold(
+        launcher.context.state_dir, attempt, 'delegate:' + identifier, permitted=permitted, block=True))
+    with admission:
+        with lock(attempt / 'agents.lock'):
+            reg = launcher.registry(attempt)
+            call, edge, target, settings = _delegation(launcher, attempt, reg, cfg, edge_id, spec, title,
+                                                         identifier, variant, reason)
+            if not permitted() or call['authorization'] != authorization:
+                raise memory_admission.AdmissionCancelled('goal authorization changed before delegation')
+            if call['status'] in (*TERMINAL, 'running'):
+                return copy.deepcopy(call)
+            _reserve_call(reg, call)
+            taken = take_pass(reg, cfg, call)
+            launcher.save_registry(attempt, reg)
+            if not taken:
+                return copy.deepcopy(call)
+        return _launch_child(launcher, attempt, call, target, edge, settings, state_dir, permitted, continuation)
+
+
+def delegation_request(reg, identifier):
+    return next((c for c in reg.get('graph_calls', []) if c['id'] == identifier),
+                reg.get('granted_delegations', {}).get(identifier))
+
+
+def _delegation(launcher, attempt, reg, cfg, edge_id, spec, title, identifier, variant, reason):
+    parent = caller(launcher, attempt, reg)
+    edge = next((e for e in cfg['edges'] if e['id'] == edge_id and e['type'] == 'delegation'), None)
+    if not edge or edge['source'] != parent.get('node_id'):
+        raise ValueError('edge is not permitted for caller')
+    target = node(cfg, edge['target'])
+    chain = {a['id']: a.get('node_id') for a in ancestors(reg, parent)}
+    if target['id'] in chain.values():
+        raise ValueError('cannot delegate to a waiting ancestor; use a rework edge')
+    settings = target['reserve' if variant == 'reserve' else 'primary']
+    if settings is None:
+        raise ValueError('reserve absent from snapshot')
+    launcher.preflight(settings)
+    params = dict(parent_agent=parent['id'], edge_id=edge_id, spec=spec, title=title,
+                  variant=variant, reason=reason)
+    call = delegation_request(reg, identifier)
+    if call and call['params'] != params:
+        raise ValueError('request_id already used for another delegation')
+    if call and call['status'] in (*TERMINAL, 'running'):
+        return call, edge, target, settings
+    if reg.get('fenced') or reg.get('stop_requested'):
+        raise RuntimeError('attempt fenced; reconcile first')
+    launcher.check_operations(attempt)
+    if parent['status'] != 'active' and parent.get('waiting_call') != identifier:
+        raise RuntimeError('parent already has an unresolved child')
+    if parent['status'] == 'active' and any(a['id'] not in chain
+            and a.get('status') not in ('released', 'stopped', 'superseded') for a in reg['agents']):
+        raise RuntimeError('another agent blocks delegation')
+    if call is None:
+        intent = read_json(launcher.context.state_dir / 'goal-intent.json', {})
+        call = dict(id=identifier, params=params, parent_agent=parent['id'], edge_id=edge_id,
+                    target=target['id'], kind='delegation', status='pending',
+                    authorization={k: intent.get(k) for k in ('generation', 'epoch')})
+    if not execution_allowed(launcher, attempt, call['authorization']):
+        raise memory_admission.AdmissionCancelled('goal authorization changed before delegation')
+    return call, edge, target, settings
+
+
+def _reserve_call(reg, call):
+    calls = reg.setdefault('graph_calls', [])
+    if call not in calls:
+        calls.append(call)
+    reg.get('granted_delegations', {}).pop(call['id'], None)
+    parent = next(a for a in reg['agents'] if a['id'] == call['parent_agent'])
+    parent.update(status='waiting_child', waiting_call=call['id'])
+
+
+def grant_pass(reg, cfg, call):
+    if call.get('kind') == 'rework':
+        take_pass(reg, cfg, call)
+        return
+    # Retain the granted request ID and authorization without an open child.
+    # The CLI can die while queued, so only admission reserves the parent.
+    reg['graph_calls'].remove(call)
+    call['status'] = 'pending'
+    reg.setdefault('granted_delegations', {})[call['id']] = call
+    parent = next(a for a in reg['agents'] if a['id'] == call['parent_agent'])
+    if parent.get('waiting_call') == call['id']:
+        parent['status'] = 'active'
+        parent.pop('waiting_call', None)
+
+
+def _launch_child(launcher, attempt, call, target, edge, settings, state_dir, permitted, continuation):
+    identifier = call['id']
+    spec, title, variant, reason = (call['params'][k] for k in ('spec', 'title', 'variant', 'reason'))
     # Existing journal keys identify every effect. Never create a second task/session
     # after loss of a receipt; check_operations above requires reconciliation first.
-    permitted = lambda: execution_allowed(launcher, attempt, call['authorization'])
     if not permitted():
         raise RuntimeError('goal authorization changed before child run')
     run = launcher.child_run(attempt, permitted=permitted)
@@ -179,13 +253,16 @@ def delegate(launcher, attempt, edge_id, spec, title, state_dir, identifier,
         if reg.get('fenced') or reg.get('stop_requested'):
             raise RuntimeError('attempt fenced')
         launcher.check_operations(attempt)
+        record = next((a for a in reg['agents'] if a['id'] == call.get('child_agent')), None)
+        if continuation and (not record or record.get('terminal') != continuation
+                             or record.get('status') not in ('ready', 'active')):
+            raise RuntimeError('delegation continuation terminal changed')
         try:
             if not permitted():
                 raise RuntimeError('goal authorization changed before task creation')
             task = launcher.effect(attempt, 'graph-task-' + identifier, 'orchestration', 'task-create',
                                    '--run', run['run_id'], '--task-title', title, '--spec', child_spec,
                                    mailbox=run['mailbox'])['task']
-            record = next((a for a in reg['agents'] if a['id'] == call.get('child_agent')), None)
             if record is None:
                 record = dict(id=str(uuid.uuid4()), node_id=target['id'], role=target['role'],
                               parent_agent=call['parent_agent'], call_id=identifier,
@@ -244,7 +321,7 @@ def grant(launcher, attempt, call_id, identifier):
         if not call or call['status'] != 'limit' or reg.get('stop_requested') or reg.get('fenced'):
             raise ValueError('no exhausted edge awaiting permission')
         grants[identifier] = dict(call_id=call_id, edge_id=call['edge_id'], at=time.time())
-        take_pass(reg, cfg, call)
+        grant_pass(reg, cfg, call)
         launcher.save_registry(attempt, reg)
         return copy.deepcopy(grants[identifier])
 

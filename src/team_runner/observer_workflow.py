@@ -9,6 +9,7 @@ import tempfile
 import time
 import uuid
 
+from . import memory_admission
 from . import runner_operations as operations
 from .infra_observer import STAGES, digest, file_digest
 from .runner_launch import Launcher
@@ -58,6 +59,7 @@ class Workflow:
         return state['desired'] == 'running' and not state['paused']
 
     def _cleanup(self, context, attempt):
+        memory_admission.queue.cancel(context.state_dir, attempt)
         launcher = self.launcher or ObserverLauncher(context, self.observer)
         reg = launcher.registry(attempt)
         if any(a.get('status') not in ('released', 'stopped', 'superseded') for a in reg.get('agents', [])):
@@ -158,7 +160,8 @@ class Workflow:
         attempt = context.state_dir / 'attempts' / str(uuid.uuid4())
         attempt.mkdir(parents=True, mode=0o700)
         compact_input = self._input(state, incident, attempt)
-        for key in ('plan', 'candidate', 'candidate_digest', 'review', 'application', 'approval', 'blocker'):
+        for key in ('plan', 'candidate', 'candidate_digest', 'review', 'application', 'approval', 'blocker',
+                    'result_memory_deferred'):
             incident.pop(key, None)
         incident.update(diagnosis=None, repair_scope=None)
         context.snapshot(attempt)
@@ -218,6 +221,33 @@ class Workflow:
         row = incident['stages'].get(stage)
         if row:
             return row
+        context = self.observer.context(state)
+
+        def permitted():
+            fresh = self.observer.load()
+            active = fresh['incidents'].get(fresh['active'], {})
+            return (active.get('id') == incident['id'] and active.get('attempt') == str(attempt)
+                    and (self._permitted(fresh) or stage == 'result' and not active.get('result_memory_deferred'))
+                    and (stage in ('diagnose', 'result') or fresh['config']['mode'] != 'diagnostic'))
+
+        try:
+            operation = f"observer:{incident['id']}:{incident['attempts']}:{stage}"
+            with memory_admission.queue.hold(context.state_dir, attempt, operation, permitted=permitted):
+                return self._dispatch_admitted(state, incident, stage, launcher, permitted)
+        except memory_admission.WaitingMemory:
+            if stage == 'result':
+                # Post-apply verification may run immediately after stop. Once
+                # deferred, it needs renewed permission before a new process.
+                incident['result_memory_deferred'] = True
+                self._save_merged(incident)
+                if not self._permitted(self.observer.load()):
+                    memory_admission.queue.cancel(context.state_dir, attempt)
+            raise
+        except memory_admission.AdmissionCancelled:
+            return None
+
+    def _dispatch_admitted(self, state, incident, stage, launcher, permitted):
+        attempt = Path(incident['attempt'])
         work = attempt / 'work' / (str(incident['attempts']) + '-' + stage)
         work.mkdir(parents=True, exist_ok=True)
         output = work / 'result.json'
@@ -231,15 +261,16 @@ class Workflow:
         self._save_merged(incident)
         # Recheck user intent immediately before transport. _launch checks it again
         # before terminal creation and worker-start through its permitted callback.
-        fresh = self.observer.load()
-        if stage != 'result' and (not self._permitted(fresh) or stage != 'diagnose' and fresh['config']['mode'] == 'diagnostic'):
+        if not permitted():
             incident['stages'].pop(stage)
             self._save_merged(incident)
             return None
         launcher.stage = stage
         launcher.workspace = work
         record = launcher.dispatch_role(attempt, STAGES[stage], spec,
-                                        'infra observer ' + stage, attempt, function=row['function'])
+                                        'infra observer ' + stage, attempt, function=row['function'],
+                                        admitted=True, permitted=permitted)
+        incident.pop('result_memory_deferred', None)
         row.update(status='running', agent=record['id'], dispatch=record['dispatch_id'])
         self._save_merged(incident)
         return row
@@ -725,6 +756,8 @@ class Workflow:
                 incident.update(status='closed' if correct else 'blocked',
                                 blocker=None if correct else 'correctness/improvement unconfirmed; repair not successful')
             self._save_merged(incident)
+        except memory_admission.WaitingMemory:
+            return
         except (OSError, ValueError, RuntimeError) as exc:
             incident['blocker'] = str(exc)
             if isinstance(exc, ValueError):

@@ -7,6 +7,7 @@ import subprocess
 import time
 import uuid
 
+from . import memory_admission
 from .runner_store import atomic_json, enqueue, lock, read_json, running
 
 DELAYS = (2, 5, 15, 30, 60, 120)
@@ -40,9 +41,6 @@ def set_intent(runner, intent, *, new_start=False):
         raise ValueError('invalid recovery intent')
     from .goal_intent import change
     change(runner, desired_state=intent)
-    if intent in ('paused', 'stopped'):
-        from .network_recovery import cancel
-        cancel(runner, intent + ' cancels scheduled network recovery')
     with lock(runner.state_dir / 'recovery-settings.lock'):
         path = runner.state_dir / 'recovery-settings.json'
         value = settings(runner)
@@ -50,6 +48,10 @@ def set_intent(runner, intent, *, new_start=False):
             value['enabled'] = True
         value['intent'] = intent
         atomic_json(path, value)
+    if intent in ('paused', 'stopped'):
+        memory_admission.queue.cancel(runner.state_dir, (runner.load_state().get('current') or {}).get('attempt_dir'))
+        from .network_recovery import cancel
+        cancel(runner, intent + ' cancels scheduled network recovery')
 
 
 def recovery_view(runner):
@@ -203,6 +205,12 @@ class Supervisor:
             journal.update(status='observing', phase='completed', next_check_at=None, next_step='observe runner', signature=signature)
             journal.pop('command_id', None)
             atomic_json(journal_path, journal)
+            return
+        if command.get('status') == 'pending' and (command.get('result') or {}).get('state') == 'waiting_memory':
+            if journal.get('status') != 'waiting_memory':
+                journal.update(status='waiting_memory', reason=command['result']['reason'], next_check_at=None,
+                               next_step='wait for agent launch admission')
+                atomic_json(journal_path, journal)
             return
         if command.get('error'):
             journal['reason'] = command['error']
@@ -369,10 +377,8 @@ class Supervisor:
                         if cur.get('attempt_dir') and not own_stop:
                             journal.update(action='continue proved terminal launch', phase='intent')
                             atomic_json(journal_path, journal)
-                            with lock(runner.state_dir / 'goal-intent.lock'):
-                                if not permitted():
-                                    return
-                                runner.launcher.resume_ready_launches(cur['attempt_dir'], runner.state_dir, permitted=permitted)
+                            runner.launcher.resume_ready_launches(cur['attempt_dir'], runner.state_dir, permitted=permitted,
+                                                                     operation=journal['incident_id'])
                             runner.recover(st, technical_only=True)
                             st = runner.load_state()
                             cur = st.get('current') or {}
@@ -423,6 +429,10 @@ class Supervisor:
                     # start_runner obtains checkout/start locks and rechecks all durable fences.
                     result = start_runner(runner, {'resume': True}, recovery=True, **launch_guards)
                     journal.update(status='observing', phase='completed', result=result, next_step='observe runner')
+            except memory_admission.WaitingMemory as exc:
+                journal.update(checks=journal['checks'] - 1, status='waiting_memory', phase='waiting',
+                               next_check_at=self.clock() + memory_admission.CHECK_INTERVAL,
+                               reason=exc.status['reason'], next_step='wait for agent launch admission')
             except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
                 count = journal['checks']
                 journal.update(reason=str(exc), status='needs_action' if count >= len(DELAYS) else 'waiting',

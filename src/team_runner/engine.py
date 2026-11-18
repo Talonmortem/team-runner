@@ -17,6 +17,7 @@ import time
 
 import uuid
 
+from . import memory_admission
 from . import runner_config as config
 
 
@@ -103,10 +104,11 @@ class Runner:
                                   repo=self.context.repo, config_root=self.context.config_root.parent,
                                   allow_unavailable_fast=allow_unavailable_fast)
 
-    def attempt_profile(self):
-        current = self.load_state().get('current') or {}
+    def attempt_profile(self, *, snapshot=None):
+        state = self.load_state() if snapshot is None else snapshot
+        current = state.get('current') or {}
         if current.get('attempt_dir'):
-            return self.context.check_attempt(current['attempt_dir'])['profile']
+            return self.context.check_attempt(current['attempt_dir'], require_current=snapshot is None)['profile']
         return self.context.profile
 
     def coordinator_spec(self, args, feat, item):
@@ -455,17 +457,12 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                          'Fresh child sessions; no --reuse or --keep-session.\nRoot instructions:\n' +
                          node(frozen, frozen['root'])['instructions'])
             spec += "\nRead $TEAM_RUNNER_ATTEMPT/config.json before work. It is the authoritative role snapshot, including on retries."
-        if not cur.get("task_id"):
-            if cur.get("attempt", 1) > 1:
-                spec += (f"\nЭто ПОПЫТКА {cur['attempt']}: прошлый координатор ({cur.get('previous_dispatch')}) прервался. "
-                         "Обязательно выполни шаг 2 (продолжение прошлой попытки).\n")
-                title += f" (attempt {cur['attempt']})"
-            with self.launch_permission():
-                task = self.effect(st, "task:" + cur["attempt_dir"], "orchestration", "task-create", "--run", st["run_id"], "--spec", spec, "--task-title", title)["task"]
-            cur["task_id"] = task["id"]
-            self.save_state(st)
-            self.log(f"{item_id}: task {task['id']} (попытка {cur.get('attempt', 1)})")
+        if not cur.get("task_id") and cur.get("attempt", 1) > 1:
+            spec += (f"\nЭто ПОПЫТКА {cur['attempt']}: прошлый координатор ({cur.get('previous_dispatch')}) прервался. "
+                     "Обязательно выполни шаг 2 (продолжение прошлой попытки).\n")
+            title += f" (attempt {cur['attempt']})"
         if args.mode == "confirm" and st.get("history") and not cur.get("gate_resolved"):
+            self.coordinator_task(st, cur, spec, title)
             if not cur.get("gate_id"):
                 gate = self.effect(st, "gate:" + cur["task_id"], "orchestration", "gate-create", "--task", cur["task_id"],
                             "--question", f"Запустить координатора для {item_id}?",
@@ -479,17 +476,52 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             cur["gate_resolved"] = True
             self.save_state(st)
         if not cur.get("dispatch_id"):
-            self.process_controls(st)
-            if st.get("stop_requested"):
-                return "stopped_attempt"
-            with self.launch_permission():
-                record = self.launcher.launch(cur["attempt_dir"], "coordinator", cur["task_id"], st["run_id"], title,
-                                         self.state_dir, mailbox=st.get("mailbox"))
-            cur["dispatch_id"] = record["dispatch_id"]
-            cur["terminal"] = record.get("terminal")
-            self.save_state(st)
-            self.notify("координатор запущен", f"{item_id}: dispatch {cur['dispatch_id']}")
+            attempt = cur['attempt_dir']
+            permitted = self.launcher.launch_allowed(attempt)
+            existing = next((agent for agent in self.launcher.registry(attempt)['agents']
+                             if cur.get('task_id') and agent.get('task_id') == cur['task_id']
+                             and agent['status'] in ('ready', 'active')), {})
+            try:
+                self.process_controls(st)
+                if st.get('stop_requested'):
+                    return 'stopped_attempt'
+                if st.get('paused'):
+                    return 'paused_gate'
+                with self.launch_permission():
+                    pass
+                admission = (nullcontext() if existing.get('terminal') or cur.get('dispatch_id') else
+                             memory_admission.queue.hold(self.state_dir, attempt, 'coordinator',
+                                                         permitted=permitted, block=True,
+                                                         between=lambda: self.process_controls(st)))
+                with admission:
+                    if not permitted():
+                        raise memory_admission.AdmissionCancelled('coordinator launch cancelled')
+                    if not cur.get('dispatch_id'):
+                        self.coordinator_task(st, cur, spec, title)
+                        with self.launch_permission():
+                            record = self.launcher.launch(attempt, "coordinator", cur["task_id"], st["run_id"], title,
+                                                          self.state_dir, mailbox=st.get("mailbox"),
+                                                          admitted=True, permitted=permitted)
+                        cur["dispatch_id"] = record["dispatch_id"]
+                        cur["terminal"] = record.get("terminal")
+                        self.save_state(st)
+                        self.notify("координатор запущен", f"{item_id}: dispatch {cur['dispatch_id']}")
+            except memory_admission.AdmissionCancelled:
+                return "stopped_attempt" if st.get("stop_requested") else "paused_gate"
         return "start"
+
+    def coordinator_task(self, st, cur, spec, title):
+        if not cur.get("task_id"):
+            with self.launch_permission():
+                if any(op.get('status') not in ('completed', 'rejected')
+                       for op in read_json(self.state_dir / 'operations.json', {}).values()):
+                    raise RuntimeError('operation outcome unknown; reconcile first')
+                self.launcher.check_operations(cur['attempt_dir'])
+                task = self.effect(st, "task:" + cur["attempt_dir"], "orchestration", "task-create",
+                                   "--run", st["run_id"], "--spec", spec, "--task-title", title)["task"]
+            cur["task_id"] = task["id"]
+            self.save_state(st)
+            self.log(f"{cur['item']}: task {task['id']} (попытка {cur.get('attempt', 1)})")
 
 
     def check_open_graph_calls(self, cur, require_success=True):
@@ -934,7 +966,7 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                     if reg.get('fenced') or reg.get('stop_requested'):
                         raise RuntimeError('delegation fenced/stopped')
                     time.sleep(.2)
-                    call = next(c for c in self.launcher.registry(attempt)['graph_calls'] if c['id'] == args.request_id)
+                    call = graph_dispatch.delegation_request(self.launcher.registry(attempt), args.request_id)
                 call = graph_dispatch.delegate(self.launcher, attempt, args.edge, spec, args.title,
                                                self.state_dir, args.request_id, args.variant, args.reason)
             else:
@@ -1297,10 +1329,7 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 raise ValueError('acceptance or user decision required; technical cleanup completed')
             if (permitted() and cur.get('attempt_dir') and not st.get('recovery_issues')
                     and not st.get('stop_requested') and not st.get('paused')):
-                with lock(self.state_dir / 'goal-intent.lock'):
-                    if not permitted():
-                        raise ValueError('technical recovery cancelled before launch')
-                    self.launcher.resume_ready_launches(cur['attempt_dir'], self.state_dir, permitted=permitted)
+                self.launcher.resume_ready_launches(cur['attempt_dir'], self.state_dir, permitted=permitted, operation=command_id)
                 self.recover(st, technical_only=True)
             if st.get('recovery_issues'):
                 raise RuntimeError('; '.join(st['recovery_issues']))
@@ -1310,6 +1339,7 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 raise RuntimeError('; '.join(st['recovery_issues']))
         elif action == 'pause':
             st['paused'] = True
+            memory_admission.queue.cancel(self.state_dir, cur.get('attempt_dir'))
         elif action == 'resolve-escalation':
             from .event_scope import classify
             matches = [m for m in cur.get('messages', [])
@@ -1373,6 +1403,7 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         elif action == 'stop':
             st['stop_requested'] = True
             self.save_state(st)  # Fence runner before interacting with Orca.
+            memory_admission.queue.cancel(self.state_dir, cur.get('attempt_dir'))
             if cur.get('attempt_dir'):
                 reg = self.launcher.registry(cur['attempt_dir'])
                 if cur.get('dispatch_id') and not any(a.get('dispatch_id') == cur['dispatch_id'] for a in reg['agents']):
@@ -1709,7 +1740,9 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 self.apply_control(st, rec['action'], rec['data'], rec['id'])
                 rec['status'] = 'done'
             except resource_wait.ResourceBusy:
-                rec['status'] = 'pending'
+                rec.update(status='pending', result={'state': 'waiting_resource', 'error': rec.get('error')})
+            except memory_admission.WaitingMemory as exc:
+                rec.update(status='pending', result={'state': 'waiting_memory', 'reason': exc.status['reason']})
             except operations.UncertainOperation as exc:
                 st.setdefault('control_uncertain', rec['id'])
                 rec.update(status='unknown', error=str(exc))
@@ -1719,8 +1752,8 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 if '_resource_wait' in rec['data']:
                     resource_wait.mark(st, rec['data'], rec['id'], cancelled=True)
                 self.save_state(st)
-            rec['result'] = {'state': ('ok' if rec['status'] == 'done' else
-                                       'waiting_resource' if rec['status'] == 'pending' else 'error'),
-                             'error': rec.get('error') if rec['status'] != 'done' else None}
+            if rec['status'] != 'pending':
+                rec['result'] = {'state': 'ok' if rec['status'] == 'done' else 'error',
+                                 'error': rec.get('error') if rec['status'] != 'done' else None}
             atomic_json(path, rec)
 

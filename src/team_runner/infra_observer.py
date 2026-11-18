@@ -163,6 +163,11 @@ class Observer:
             state.setdefault('command_receipts', {})[request_id] = {'args': args, 'result': result}
             atomic_json(self.path, state)
             atomic_json(receipt, {'args': args, 'result': result})
+            if action in ('pause', 'stop', 'mode'):
+                from .memory_admission import queue
+                attempt = state['incidents'].get(state['active'], {}).get('attempt')
+                if attempt:
+                    queue.cancel(self.context(state).state_dir, attempt)
             return result
 
     def context(self, state=None):

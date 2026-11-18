@@ -1,4 +1,5 @@
 """Bounded recovery of proved provider network failures via the runner owner queue."""
+from contextlib import ExitStack, nullcontext
 import copy
 import json
 from pathlib import Path
@@ -6,6 +7,7 @@ import re
 import time
 import uuid
 
+from . import memory_admission
 from .runner_store import atomic_json, enqueue, lock, read_json
 from . import runner_operations as operations
 
@@ -280,11 +282,16 @@ def check_receipt(receipt, agent, request):
 
 
 def apply(runner, state, data, identifier):
-    with lock(runner.state_dir / 'network-recovery.lock'):
-        return _apply(runner, state, data, identifier)
+    allowed = lambda: permitted(runner, runner.load_state(), data['scope'])
+    with ExitStack() as admission:
+        if data['action'] == 'replace':
+            admission.enter_context(memory_admission.queue.hold(
+                runner.state_dir, data['_target'], 'network:' + identifier, permitted=allowed))
+        with lock(runner.state_dir / 'network-recovery.lock'):
+            return _apply(runner, state, data, identifier, release_admission=admission.close)
 
 
-def _apply(runner, state, data, identifier):
+def _apply(runner, state, data, identifier, *, release_admission):
     """Revalidate every effect; never relaunch an item or change its frozen snapshot."""
     from .recovery import _unknown
     if not permitted(runner, runner.load_state(), data['scope']):
@@ -327,6 +334,7 @@ def _apply(runner, state, data, identifier):
         elif data['action'] == 'replace':
             replacement = replace_executor(runner, state, attempt, reg, agent, observed,
                                            session, journal, journal_path, allowed)
+            release_admission()
             with runner.launch_permission():
                 if not allowed():
                     raise ValueError('network handoff cancelled')
@@ -511,8 +519,12 @@ def reconcile(runner, state, data, *, observe_only=False):
                     observed = runner.launcher.observe_agent(previous)
                     if closed.get('status') != 'completed' and observed.get('terminalResource', {}).get('ownershipState') != 'external':
                         raise ValueError('interrupted stop is not an exact external terminal')
-                    agent = replace_executor(runner, state, Path(attempt), reg, previous, observed,
-                                             session, journal, journal_path, allowed, reconciled_control=uncertain_id)
+                    # This is one nonblocking admission check. A deferral unwinds
+                    # both recovery locks before the runner handles other commands.
+                    with memory_admission.queue.hold(runner.state_dir, attempt,
+                            'network-reconcile:' + data['request'], permitted=allowed):
+                        agent = replace_executor(runner, state, Path(attempt), reg, previous, observed,
+                                                 session, journal, journal_path, allowed, reconciled_control=uncertain_id)
                     candidates = [agent]
                     ops = read_json(runner.launcher.journal(attempt), {})
                 if agent and agent not in candidates:
@@ -522,7 +534,9 @@ def reconcile(runner, state, data, *, observe_only=False):
                             or agent not in candidates or not allowed()):
                         raise ValueError('reserved network replacement continuation cancelled or unconfirmed')
                     runner.launcher.check_operations(attempt)
-                    with runner.launch_permission():
+                    admission = (nullcontext() if agent.get('terminal') else memory_admission.queue.hold(
+                        runner.state_dir, attempt, 'network-reconcile:' + data['request'], permitted=allowed))
+                    with admission, runner.launch_permission():
                         runner.launcher._launch(Path(attempt), reg, agent, previous.get('launch_title', previous['role']),
                             runner.state_dir, retry_of=previous['dispatch_id'], permitted=allowed,
                             reconciled_control=uncertain_id)

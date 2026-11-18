@@ -32,6 +32,7 @@ class ObserverProcess(Manager):
 
     def run(self, nonce, poll_interval=10):
         from .infra_observer import Observer
+        from .memory_admission import CHECK_INTERVAL, view as memory_view
         observer = Observer(self.catalog)
         with lock(self.directory / 'instance.lock', blocking=False):
             with lock(self.directory / 'state.lock'):
@@ -43,6 +44,7 @@ class ObserverProcess(Manager):
                 record.update(state='running', pid=os.getpid(), process_stamp=process_stamp(os.getpid()), boot_id=boot_id())
                 atomic_json(claim, record); atomic_json(self.directory / 'instance.json', record)
             while True:
+                interval = poll_interval
                 try:
                     state = observer.tick()
                     active = state['incidents'].get(state['active']) if state['active'] else None
@@ -50,14 +52,18 @@ class ObserverProcess(Manager):
                     # and application/result receipt must settle before owner exit.
                     unsettled = state.get('cleanup_pending') or active and (active.get('application', {}).get('status') == 'applying'
                         or any(s.get('status') in ('running', 'dispatching') for s in active.get('stages', {}).values())
-                        or active.get('status') == 'checking_result')
+                        or active.get('status') == 'checking_result' and not active.get('result_memory_deferred'))
                     if state['desired'] == 'stopped' and not unsettled:
                         break
+                    if active and active.get('attempt') and state['desired'] == 'running' and not state['paused']:
+                        context = observer.context(state)
+                        if memory_view(context.state_dir, {'current': {'attempt_dir': active['attempt']}}):
+                            interval = min(interval, CHECK_INTERVAL)
                 except Exception as exc:
                     with lock(observer.directory / 'control.lock'):
                         state = observer.load(); state['blocker'] = 'observer tick unavailable: ' + type(exc).__name__
                         atomic_json(observer.path, state)
-                time.sleep(poll_interval)
+                time.sleep(interval)
             with lock(self.directory / 'state.lock'):
                 record.update(state='stopped'); atomic_json(self.directory / 'instance.json', record)
 

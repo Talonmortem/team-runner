@@ -164,7 +164,9 @@ class Recovery(Fixture):
                 launch.dispatch_role(attempt, 'tester', 'first', 'T1', self.root, function='f')
             before = store.read_json(fake.root / 'transport.json')
             self.assertFalse(launch.reconcile_attempt(attempt))
-            record = launch.dispatch_role(attempt, 'tester', 'first', 'T1', self.root, function='f')
+            self.proc.memory(0)
+            with patch.object(self.admission, 'sleep', side_effect=AssertionError('existing terminal waited for memory')):
+                record = launch.dispatch_role(attempt, 'tester', 'first', 'T1', self.root, function='f')
             after = store.read_json(fake.root / 'transport.json')
         self.assertEqual(before['tasks'], after['tasks'])
         self.assertEqual(before['serial'], after['serial'])

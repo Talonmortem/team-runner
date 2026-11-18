@@ -344,7 +344,7 @@ def workspace_summary(catalog, project_id, confirmed=True):
                            any(m.get('type') == 'question' and not m.get('answered') and not m.get('closed') for m in cur.get('messages', [])))}
         try:
             view = state_view(Runner(catalog.context(project_id, workspace_id, allow_disabled=True)))
-            row.update(view['health'])
+            row.update(view['health'], waiting_memory=view['waiting_memory'])
             row.update(completed=sum(q.get('status') == 'completed' for q in view['queue']), total=len(view['queue']))
         except (ValueError, OSError, KeyError, TypeError) as exc:
             row.update(state='error', error=str(exc), completed=None, total=None)

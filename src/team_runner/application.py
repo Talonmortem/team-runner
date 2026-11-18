@@ -9,10 +9,11 @@ from . import runner_config as config
 from .runner_store import atomic_json, enqueue, lock, read_json, running
 
 
-def goals(runner):
+def goals(runner, *, profile=None):
     repo = runner.repo
     result = []
-    for path in sorted((repo / runner.attempt_profile()['tracking_root']).glob('*/Tasks.json')):
+    profile = runner.attempt_profile() if profile is None else profile
+    for path in sorted((repo / profile['tracking_root']).glob('*/Tasks.json')):
         data = read_json(path)
         if data.get('kind') == 'goal' or any('path' in q for q in data.get('queue', [])):
             result.append(str(path.parent.relative_to(repo)))
@@ -35,9 +36,11 @@ def config_path(runner):
 
 def state_view(runner):
     from .recovery import recovery_view
+    from .memory_admission import view as memory_view
     from .runner_operations import rejected_reply
     st = runner.load_state()
     cur = st.get('current') or {}
+    profile = runner.attempt_profile(snapshot=st)
     agents = runner.launcher.registry(cur['attempt_dir']) if cur.get('attempt_dir') else {
         'agents': ([{'role': 'coordinator', 'dispatch_id': cur.get('dispatch_id'),
                      'terminal': cur.get('terminal'), 'requested': None, 'observed': None}]
@@ -45,7 +48,7 @@ def state_view(runner):
     from .runner_metrics import annotate_agents
     annotate_agents(runner.repo, agents['agents'])
     queue = []
-    if st.get('goal') in goals(runner):
+    if st.get('goal') in goals(runner, profile=profile):
         tracking = Tracking(runner.repo / st['goal'])
         for _, _, data in tracking.features():
             queue.extend({**item, 'status': 'verification_required'} if item.get('check_scope') == 'stage'
@@ -70,9 +73,10 @@ def state_view(runner):
     st = dict(st, current=dict(cur, messages=classified_messages(cur, agents))) if cur else st
     from .state_time import view as time_view
     from .network_recovery import view as network_view
-    return {'time': time_view(runner), 'network': network_view(runner), 'autonomy': autonomy_view(runner), 'events': events_view(cur.get('attempt_dir')),
-            'verification': verification_view(cur.get('attempt_dir'), runner.attempt_profile()['checks'], active.get('check_scope', 'item')),
-            'state': st, 'health': {'state': 'error' if error else 'ok', 'error': error},
+    memory = memory_view(runner.state_dir, st)
+    return {'waiting_memory': memory, 'time': time_view(runner), 'network': network_view(runner), 'autonomy': autonomy_view(runner), 'events': events_view(cur.get('attempt_dir')),
+            'verification': verification_view(cur.get('attempt_dir'), profile['checks'], active.get('check_scope', 'item')),
+            'state': st, 'health': {'state': 'error' if error else 'waiting_memory' if memory else 'ok', 'error': error},
             'recovery': recovery_view(runner),
             'resources': agents, 'queue': queue, 'running': running(runner.state_dir),
             'settings': config.projections(runner.context.settings_dir, st, agents, runner.context.role_layers,
@@ -87,7 +91,8 @@ def state_view(runner):
 def legacy_status_view(runner):
     st = runner.load_state()
     cur = st.get("current") or {}
-    result = dict(st, runner_running=running(runner.state_dir))
+    from .memory_admission import view as memory_view
+    result = dict(st, runner_running=running(runner.state_dir), waiting_memory=memory_view(runner.state_dir, st))
     result["resources"] = runner.launcher.registry(cur["attempt_dir"]) if cur.get("attempt_dir") else None
     from .runner_metrics import annotate_agents
     annotate_agents(runner.repo, (result['resources'] or {}).get('agents', []))
@@ -405,6 +410,7 @@ def _submit_v1(runner, command):
 def process_v1(runner, state, path, record):
     """Called only under runner.lock. Terminal receipts are never rewritten."""
     from .protocol import version
+    from .memory_admission import WaitingMemory
     from . import runner_operations
     import subprocess
     version(record)
@@ -461,6 +467,8 @@ def process_v1(runner, state, path, record):
             if record['action'] == 'retry':
                 result['prepared'] = _execution_scope(runner, state)
         record.update(status='succeeded', result=result, error=None)
+    except WaitingMemory as exc:
+        record.update(status='pending', result={'state': 'waiting_memory', 'reason': exc.status['reason']}, error=None)
     except ContractError as exc:
         record.update(status='failed', error=exc.as_dict())
     except runner_operations.UncertainOperation as exc:

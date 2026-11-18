@@ -190,16 +190,17 @@ class Context:
         atomic_json(attempt / 'context.json', value)
         return value
 
-    def check_attempt(self, attempt):
+    def check_attempt(self, attempt, *, require_current=True):
         attempt = Path(attempt).resolve()
         if attempt.parent != (self.state_dir / 'attempts').resolve():
             raise ValueError('attempt is outside workspace namespace')
         data = read_json(attempt / 'context.json', {})
         if data.get('identity') != self.identity():
             raise ValueError('attempt context does not match project/workspace/Orca identity')
-        current = read_json(self.state_dir / 'state.json', {}).get('current') or {}
-        if current.get('attempt_dir') != str(attempt):
-            raise ValueError('attempt is no longer current')
+        if require_current:
+            current = read_json(self.state_dir / 'state.json', {}).get('current') or {}
+            if current.get('attempt_dir') != str(attempt):
+                raise ValueError('attempt is no longer current')
         return data
 
 

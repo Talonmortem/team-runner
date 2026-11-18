@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 import json
 
 import os
@@ -16,6 +17,7 @@ import hashlib
 
 import datetime as dt
 
+from . import memory_admission
 from . import runner_operations as operations
 
 from .runner_store import atomic_json, lock, read_json
@@ -278,6 +280,10 @@ class Launcher:
                 if runtime['go_cache']:
                     env['GOCACHE'] = runtime['go_cache']
                 command = ['env', *[k + '=' + v for k, v in env.items()], *self.argv(cfg, state_dir, runtime)]
+                self.context.check_attempt(attempt)
+                self.check_operations(attempt)
+                if permitted is not None and not permitted():
+                    raise memory_admission.AdmissionCancelled('agent launch cancelled before terminal creation')
                 terminal = self.create_terminal(attempt, record['id'] + '-terminal', command, title, record.get('mailbox'))
                 record.update(terminal=terminal['handle'], terminal_owned=True, incarnation=terminal.get('incarnationId'))
                 self.save_registry(attempt, reg)
@@ -318,8 +324,25 @@ class Launcher:
             raise
 
 
+    def launch_allowed(self, attempt):
+        expected = read_json(self.context.state_dir / 'goal-intent.json', {})
+
+        def permitted():
+            fresh = read_json(self.context.state_dir / 'state.json', {})
+            intent = read_json(self.context.state_dir / 'goal-intent.json', {})
+            desired = (intent.get('desired_state') if intent else
+                       read_json(self.context.state_dir / 'recovery-settings.json', {}).get('intent', 'running'))
+            return (not any(fresh.get(k) for k in ('paused', 'stop_requested', 'control_uncertain'))
+                    and (fresh.get('current') or {}).get('attempt_dir') == str(attempt)
+                    and all(intent.get(k) == expected.get(k) for k in ('generation', 'epoch'))
+                    and desired == 'running')
+
+        return permitted
+
+
     def launch(self, attempt, role, task_id, run_id, title, state_dir, mailbox=None, retry_of=None,
-               function=None, reuse=None, context_percent=None, keep_session=False, variant='primary', reason=None):
+               function=None, reuse=None, context_percent=None, keep_session=False, variant='primary', reason=None,
+               *, admitted=False, permitted=None):
         attempt = Path(attempt)
         self.context.check_attempt(attempt)
         from .runner_config import snapshot_role
@@ -330,7 +353,18 @@ class Launcher:
         cfg = snapshot_role(attempt, role, variant)
         runner_config.validate_role_scope(cfg, self.context.repo)
         self.preflight(cfg)
-        with lock(attempt / 'agents.lock'):
+        permitted = permitted or self.launch_allowed(attempt)
+        if reuse or admitted:
+            admission = nullcontext()
+        else:
+            existing = next((a for a in self.registry(attempt)['agents']
+                             if a.get('task_id') == task_id and a['status'] in ('ready', 'active')), {})
+            admission = (nullcontext() if existing.get('terminal') else
+                         memory_admission.queue.hold(self.context.state_dir, attempt, 'task:' + task_id,
+                                                     permitted=permitted, block=True))
+        with admission, lock(attempt / 'agents.lock'):
+            if not permitted():
+                raise memory_admission.AdmissionCancelled('agent launch cancelled before dispatch')
             reg = self.registry(attempt)
             if reg['fenced'] or any(a['status'] in ('launching', 'unknown') for a in reg['agents']):
                 raise RuntimeError('attempt fenced or launch unconfirmed; reconcile first')
@@ -344,7 +378,7 @@ class Launcher:
                 if existing['status'] == 'active':
                     return dict(existing)
                 self.check_launch_recovery(reg)
-                return self._launch(attempt, reg, existing, title, state_dir, retry_of)
+                return self._launch(attempt, reg, existing, title, state_dir, retry_of, permitted=permitted)
             self.check_launch_recovery(reg)
             if graph.get('version') != 3:
                 self.sequential_guard(attempt, reg, role, task_id)
@@ -364,7 +398,7 @@ class Launcher:
                 record.update({k: old[k] for k in ('terminal', 'terminal_owned', 'incarnation')})
             reg['agents'].append(record)
             self.save_registry(attempt, reg)
-            return self._launch(attempt, reg, record, title, state_dir, retry_of)
+            return self._launch(attempt, reg, record, title, state_dir, retry_of, permitted=permitted)
 
 
     def rework_coordinator(self, attempt, dispatch_id, task_id, run_id, state_dir):
@@ -446,7 +480,29 @@ class Launcher:
         snapshot = read_json(Path(attempt) / 'context.json', {})
         return prepare(snapshot.get('profile', {}).get('runtime', {}))
 
-    def dispatch_role(self, attempt, role, spec, title, state_dir, function=None, reuse=None, context_percent=None, keep_session=False, variant='primary', reason=None):
+    def dispatch_role(self, attempt, role, spec, title, state_dir, function=None, reuse=None,
+                      context_percent=None, keep_session=False, variant='primary', reason=None, *,
+                      admitted=False, permitted=None):
+        self.context.check_attempt(attempt)
+        cfg = read_json(Path(attempt) / 'config.json', {})
+        if cfg.get('version') == 3:
+            raise ValueError('graph workers must use delegate or the CLI role shorthand')
+        permitted = permitted or self.launch_allowed(attempt)
+        reg = self.registry(attempt)
+        pending = next((request for request in reg.get('launch_requests', [])
+                        if request['status'] != 'done'), {})
+        continuation = next((a['task_id'] for a in reg['agents'] if a.get('terminal')
+                             and a.get('task_id') == pending.get('task_id') and a.get('task_id')
+                             and a['status'] in ('ready', 'active')), None)
+        operation = 'role:' + hashlib.sha256(repr((role, spec, title, function, variant, reason)).encode()).hexdigest()
+        admission = (nullcontext() if reuse or admitted or continuation else memory_admission.queue.hold(
+            self.context.state_dir, attempt, operation, permitted=permitted, block=True))
+        with admission:
+            return self._dispatch_role(attempt, role, spec, title, state_dir, function, reuse,
+                                       context_percent, keep_session, variant, reason, permitted, continuation)
+
+    def _dispatch_role(self, attempt, role, spec, title, state_dir, function, reuse,
+                       context_percent, keep_session, variant, reason, permitted, continuation):
         self.context.check_attempt(attempt)
         if read_json(Path(attempt) / 'config.json', {}).get('version') == 3:
             raise ValueError('graph workers must use delegate or the CLI role shorthand')
@@ -469,7 +525,7 @@ class Launcher:
             self.sequential_guard(attempt, reg, role)
             if variant == 'reserve' or (role.startswith('implementer_') and not reuse):
                 self.reserve_guard(reg, role, function)
-        run = self.child_run(attempt)
+        run = self.child_run(attempt, permitted=permitted)
         spec = ('Role: ' + role + '. Variant: ' + variant + '. Reason: ' + (reason or '') + '. Launch settings (authoritative): ' + json.dumps(cfg) +
                 '\nUse this snapshot instead of static model defaults. No nested agents.\n'
                 'Transport: arbitrary message text only via python3 -m team_runner.orca_msg send --body-file FILE '
@@ -480,6 +536,9 @@ class Launcher:
                 'once; no additional narrative report is needed. Link detailed evidence instead of copying it.\n\n' + spec)
         with lock(Path(attempt) / 'agents.lock'):
             reg = self.registry(attempt)
+            if not permitted():
+                raise memory_admission.AdmissionCancelled('role launch cancelled before task creation')
+            self.check_operations(attempt)
             if reg['fenced']:
                 raise RuntimeError('attempt fenced')
             self.check_launch_recovery(reg)
@@ -487,6 +546,8 @@ class Launcher:
                 self.reuse_source(reg, role, cfg, function, reuse, context_percent)
             params = dict(role=role, spec=spec, title=title, function=function, reuse=reuse, context_percent=context_percent, keep_session=keep_session, variant=variant, reason=reason)
             pending = [r for r in reg.get('launch_requests', []) if r['status'] != 'done']
+            if continuation and (not pending or pending[0].get('task_id') != continuation):
+                raise RuntimeError('role launch continuation changed')
             if pending and pending[0]['params'] != params:
                 raise RuntimeError('unfinished role launch has different parameters; reconcile first')
             request = pending[0] if pending else {'id': str(uuid.uuid4()), 'params': params, 'status': 'creating'}
@@ -503,7 +564,8 @@ class Launcher:
                 self.save_registry(attempt, reg)
                 raise
         record = self.launch(attempt, role, task['id'], run['run_id'], title, state_dir, run['mailbox'],
-                        function=function, reuse=reuse, context_percent=context_percent, keep_session=keep_session, variant=variant, reason=reason)
+                        function=function, reuse=reuse, context_percent=context_percent, keep_session=keep_session, variant=variant, reason=reason,
+                        admitted=not continuation, permitted=permitted)
         with lock(Path(attempt) / 'agents.lock'):
             reg = self.registry(attempt)
             next(r for r in reg['launch_requests'] if r['id'] == request['id'])['status'] = 'done'
@@ -1034,24 +1096,36 @@ class Launcher:
         return operations.closed_launch_evidence(op, self.orca, self.context.orca_id)
 
 
-    def resume_ready_launches(self, attempt, state_dir, permitted=None):
+    def resume_ready_launches(self, attempt, state_dir, permitted=None, *, operation=None):
         """Continue exact live launches or replace a proved dead pre-Dispatch once."""
         attempt = Path(attempt)
         self.context.check_attempt(attempt)
-        with lock(attempt / 'agents.lock'):
-            reg = self.registry(attempt)
-            if reg.get('fenced') or reg.get('stop_requested'):
-                raise RuntimeError('attempt fenced; launch continuation forbidden')
-            self.check_operations(attempt)
-            for record in list(reg['agents']):
-                if record.get('status') not in ('ready', 'restart_ready') or record.get('dispatch_id'):
+        permitted = permitted or self.launch_allowed(attempt)
+        initial = self.registry(attempt)
+        if initial.get('fenced') or initial.get('stop_requested'):
+            raise RuntimeError('attempt fenced; launch continuation forbidden')
+        self.check_operations(attempt)
+        candidates = sorted(initial['agents'], key=lambda a: a['status'] == 'restart_ready' or not a.get('terminal'))
+        for candidate in candidates:
+            if (candidate.get('status') not in ('ready', 'restart_ready')
+                    or candidate.get('dispatch_id') or candidate.get('acceptance_rework')):
+                continue
+            needs_process = candidate['status'] == 'restart_ready' or not candidate.get('terminal')
+            key = 'recover:' + (operation + ':' if operation else '') + candidate['id']
+            admission = (memory_admission.queue.hold(self.context.state_dir, attempt, key,
+                         permitted=permitted) if needs_process else nullcontext())
+            with admission, lock(Path(state_dir) / 'goal-intent.lock'), lock(attempt / 'agents.lock'):
+                reg = self.registry(attempt)
+                if reg.get('fenced') or reg.get('stop_requested'):
+                    raise RuntimeError('attempt fenced; launch continuation forbidden')
+                self.check_operations(attempt)
+                record = next((a for a in reg['agents'] if a['id'] == candidate['id']), {})
+                if record.get('status') != candidate['status'] or record.get('terminal') != candidate.get('terminal'):
                     continue
-                if permitted is not None and not permitted():
-                    raise RuntimeError('launch continuation cancelled by user intent')
-                if record.get('acceptance_rework'):
-                    continue
-                ops = read_json(self.journal(attempt), {})
+                if not permitted():
+                    raise memory_admission.AdmissionCancelled('launch continuation cancelled by user intent')
                 if record['status'] == 'restart_ready':
+                    ops = read_json(self.journal(attempt), {})
                     if (record.get('replacement_of') or record['id'] + '-dispatch' in ops
                             or not self.closed_pre_dispatch(record, ops.get(record['id'] + '-terminal', {}))):
                         raise RuntimeError('pre-Dispatch terminal replacement not proved')

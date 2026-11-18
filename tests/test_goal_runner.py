@@ -22,6 +22,7 @@ from team_runner import runner_store as store
 from team_runner import runner_ui as ui
 from team_runner.engine import Runner
 from team_runner.catalog import Catalog, Context, PROFILE
+from memory_fixtures import isolated_admission
 from unittest.mock import Mock
 runner = Runner(Context('unused', 'unused', TEAM, TEAM, TEAM, TEAM, 'fixture', 'instance', PROFILE, ({}, {})))
 launch = runner.launcher
@@ -33,6 +34,7 @@ class Fixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         base = Path(self.temp.name)
+        self.proc, self.admission = isolated_admission(self, base)
         import subprocess
         repo = base / 'repo'; repo.mkdir()
         subprocess.run(['git','init','-q',str(repo)], check=True)
