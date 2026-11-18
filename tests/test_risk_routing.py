@@ -52,7 +52,7 @@ class RiskRoles(Fixture):
         cfg = config.defaults()
         self.assertEqual(set(cfg['roles']), set(config.ROLES))
         for role in ('tester_complex', 'final_reviewer', 'escalation'):
-            self.assertEqual((cfg['roles'][role]['model'], cfg['roles'][role]['effort']), ('gpt-6.1-sol', 'high'))
+            self.assertEqual((cfg['roles'][role]['model'], cfg['roles'][role]['effort']), ('gpt-6.2-sol', 'high'))
         for role in ('final_reviewer_critical', 'escalation_expert'):
             self.assertEqual(cfg['roles'][role]['model'], 'claude-opus-5-5')
         legacy = {'version': 1, 'roles': copy.deepcopy(cfg['roles'])}

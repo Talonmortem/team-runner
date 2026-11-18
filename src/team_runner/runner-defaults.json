@@ -13,7 +13,7 @@
       "agent": "codex",
       "profile": "",
       "provider": "codex-lb",
-      "model": "gpt-6.1-sol",
+      "model": "gpt-6.2-sol",
       "effort": "high"
     },
     "explorer": {
@@ -34,7 +34,7 @@
       "agent": "codex",
       "profile": "",
       "provider": "codex-lb",
-      "model": "gpt-6.1-sol",
+      "model": "gpt-6.2-sol",
       "effort": "high"
     },
     "tester": {
@@ -48,14 +48,14 @@
       "agent": "codex",
       "profile": "",
       "provider": "codex-lb",
-      "model": "gpt-6.1-sol",
+      "model": "gpt-6.2-sol",
       "effort": "high"
     },
     "escalation": {
       "agent": "codex",
       "profile": "",
       "provider": "codex-lb",
-      "model": "gpt-6.1-sol",
+      "model": "gpt-6.2-sol",
       "effort": "high"
     },
     "completion_checker": {
@@ -69,7 +69,7 @@
       "agent": "codex",
       "profile": "",
       "provider": "codex-lb",
-      "model": "gpt-6.1-sol",
+      "model": "gpt-6.2-sol",
       "effort": "high"
     },
     "final_reviewer_critical": {

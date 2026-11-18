@@ -53,6 +53,9 @@ def _capture(runner):
     paths = {'startup': runner.state_dir / 'startup.json',
              'recovery_settings': runner.state_dir / 'recovery-settings.json',
              'recovery': runner.state_dir / 'recovery.json',
+             'autonomy': runner.state_dir / 'autonomy.json',
+             'autonomy_budget': runner.state_dir / 'autonomy-budget.json',
+             'network': runner.state_dir / 'network-recovery.json',
              'controller': runner.state_dir / 'goal-controller.json',
              'effects': runner.state_dir / 'operations.json',
              'startup_effects': runner.launcher.journal(runner.state_dir / 'startup')}
@@ -138,6 +141,10 @@ def summary(runner):
             progress['incomplete_features'].append(feature['id'])
         progress['total'] += len(queue)
         progress['completed'] += sum(accepted)
+    from .event_scope import pending
+    registry = facts.get('agents', {})
+    active_messages = pending(cur, registry) if cur.get('attempt_dir') else cur.get('messages', [])
+    limited_calls = [call for call in registry.get('graph_calls', []) if call.get('status') == 'limit']
     last = (state.get('history') or [{}])[-1]
     final = {'status': 'not_verified', 'attempt': None}
     if last.get('item') == 'GOAL-FINAL-REVIEW':
@@ -163,9 +170,19 @@ def summary(runner):
         actions = ['pause', 'stop'] if desired == 'running' else ['stop']
     unknown = state.get('control_uncertain') or state.get('stop_status') == 'unknown' or facts['startup'].get('status') == 'unknown'
     from .runner_operations import rejected_reply
-    unknown = unknown or any(op.get('status') not in ('completed', 'rejected') and not rejected_reply(op)
-                             for key, journal in facts.items() if key.endswith('effects')
-                             for op in journal.values())
+    unsettled = [op for key, journal in facts.items() if key.endswith('effects')
+                 for op in journal.values() if op.get('status') not in ('completed', 'rejected')]
+    unknown = unknown or any(not rejected_reply(op) for op in unsettled)
+    from .autonomy import call_authority, view as autonomy_view
+    autonomy = facts['autonomy']
+    authority = {k: intent.get(k) for k in ('generation', 'epoch')}
+    waiting_for_pass = (bool(limited_calls) and desired == 'running' and facts['runner_running']
+                        and not (state.get('paused') or state.get('stop_requested') or registry.get('stop_requested')
+                                 or registry.get('fenced') or active_messages or unknown or unsettled)
+                        and autonomy.get('enabled') is True and autonomy.get('unlimited_passes') is True
+                        and autonomy.get('scope') == {'identity': runner.context.identity(),
+                                                     'generation': authority['generation']}
+                        and all(call_authority(registry, call) == authority for call in limited_calls))
     if unknown:
         message = 'Inspect and reconcile the unconfirmed effect'
         evidence = {'control_request_id': state.get('control_uncertain')}
@@ -183,12 +200,15 @@ def summary(runner):
             observed, actions = 'stopping', ['stop']
         else:
             observed, actions = 'stopped', ['retry'] if cur.get('attempt_dir') else ['start'] if not cur else []
+    elif desired == 'running' and any(s.get('scope') == {'identity': runner.context.identity(),
+                 'generation': intent.get('generation'), 'epoch': intent.get('epoch'), 'attempt': cur.get('attempt_dir')}
+                 and s.get('status') == 'needs_action'
+             for s in facts['network'].get('sessions', {}).values()):
+        block('network_recovery_required', 'Network recovery requires inspection', ['reconcile', 'stop'],
+              {'sessions': [s for s in facts['network']['sessions'].values() if s.get('scope', {}).get('attempt') == cur.get('attempt_dir')]})
     elif facts.get('agents', {}).get('graph_calls') and facts['agents'].get('fenced'):
         block('graph_outcome_unknown', 'Исход дочернего вызова не подтверждён. Сверьте состояние или остановите цепочку.',
               ['reconcile', 'stop'], {'issues': facts['agents'].get('recovery_issues', [])})
-    elif any(c.get('status') == 'limit' for c in facts.get('agents', {}).get('graph_calls', [])):
-        block('graph_edge_limit', 'Лимит связи исчерпан. Разрешите один проход либо остановите выполнение.',
-              ['stop'], {'calls': [c for c in facts['agents']['graph_calls'] if c.get('status') == 'limit']})
     elif cur.get('failed'):
         block('attempt_failed', 'Review the failed attempt before retrying',
               ['retry'] if not facts['runner_running'] and state.get('stop_status') == 'stopped' else ['stop'],
@@ -196,11 +216,11 @@ def summary(runner):
     elif cur.get('gate_id') and not cur.get('gate_resolved') and not cur.get('gate_resolution'):
         block('confirmation_required', 'Choose how to proceed with the next item', ['resolve', 'stop'])
     elif any(m.get('type') == 'question' and not m.get('answered') and not m.get('closed')
-             for m in cur.get('messages', [])):
+             for m in active_messages):
         block('answer_required', 'Answer the pending agent question',
               ['reply', 'pause', 'stop'] if facts['runner_running'] and desired == 'running' else ['reply', 'stop'])
     elif any(m.get('type') == 'escalation' and not m.get('answered') and not m.get('closed')
-             for m in cur.get('messages', [])):
+             for m in active_messages):
         block('escalation_required', 'Review the escalation and agent diagnostics; stop execution if intervention is needed',
               ['stop'])
     elif state.get('recovery_issues') or recovery_fact.get('status') == 'needs_action':
@@ -208,6 +228,9 @@ def summary(runner):
               {'issues': state.get('recovery_issues', []), 'reason': recovery_fact.get('reason')})
     elif state.get('last_error'):
         block('runner_error', state['last_error'], ['reconcile'])
+    elif limited_calls and not waiting_for_pass:
+        block('graph_edge_limit', 'Лимит связи исчерпан. Разрешите один проход либо остановите выполнение.',
+              ['stop'], {'calls': limited_calls})
     elif not facts['runner_running'] and facts['startup'].get('status') == 'starting' and desired == 'running':
         observed, actions = 'starting', ['stop']
     elif not facts['runner_running'] and state.get('goal') and desired == 'running':
@@ -258,7 +281,10 @@ def summary(runner):
         observed, actions = 'unconfirmed', []
         blocker = {'code': 'observation_changed', 'message': 'State changed during observation',
                    'facts': {}, 'actions': []}
-    return {'schema_version': SCHEMA_VERSION, 'identity': runner.context.identity(),
+    autonomy_status = autonomy_view(runner)
+    if waiting_for_pass and confirmed and observed == 'running' and not blocker:
+        autonomy_status['waiting_for_pass'] = True
+    return {'autonomy': autonomy_status, 'schema_version': SCHEMA_VERSION, 'identity': runner.context.identity(),
             'revision': digest(facts), 'generation': intent.get('generation'), 'epoch': intent.get('epoch'),
             'goal': intent.get('goal') or state.get('goal'), 'desired_state': desired,
             'observed_state': observed, 'confirmed': confirmed,

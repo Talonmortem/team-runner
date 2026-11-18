@@ -6,7 +6,7 @@
 `$TEAM_RUNNER_ATTEMPT/config.json`; права и независимость роли сохраняются.
 
 - Runtime: Codex
-- Model: `gpt-6.1-sol`
+- Model: `gpt-6.2-sol`
 - Reasoning effort: `high`
 - Access: read-only
 

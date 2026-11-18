@@ -55,12 +55,15 @@ def profile(value):
         p = Path(result[key])
         if not result[key] or p.is_absolute() or '..' in p.parts:
             raise ValueError(key + ' must be a relative directory')
-    for key, allowed in [('acceptance', {'require_commit', 'require_clean'}), ('workflow', {'allow_commits', 'sequential_agents'})]:
+    for key, allowed in [('acceptance', {'require_commit', 'require_clean'}),
+                         ('workflow', {'allow_commits', 'sequential_agents', 'commit_after_review'})]:
         if not isinstance(result[key], dict) or set(result[key]) - allowed or any(type(v) is not bool for v in result[key].values()):
             raise ValueError('invalid ' + key)
         result[key] = {**PROFILE[key], **result[key]}
     if result['acceptance']['require_commit'] and not result['workflow']['allow_commits']:
         raise ValueError('commit acceptance requires allow_commits')
+    if result['workflow'].get('commit_after_review') and not result['workflow']['allow_commits']:
+        raise ValueError('commit_after_review requires allow_commits')
     if not isinstance(result['checks'], list):
         raise ValueError('checks must be a list')
     for check in result['checks']:

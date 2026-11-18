@@ -36,4 +36,4 @@ Commands run, results, failures, likely causes, missing coverage, verification s
 
 Формат — короткий формат из `$TEAM_RUNNER_MATERIALS/roles-and-rules.md` §«Формат отчёта worker».
 
-T1 всех задач и T2 standard — tester. T2 complex после T1 PASS — tester_complex (gpt-6.1-sol high), отдельная сессия. Самостоятельно проектирует T2 по требованиям, матрице рисков, frozen manifest и отчёту T1; не повторяет полный T1 без причины. Изменённые входы аннулируют PASS. Reuse — только одна попытка, функция, роль, настройки, измеренный контекст ≤50%.
+T1 всех задач и T2 standard — tester. T2 complex после T1 PASS — tester_complex (gpt-6.2-sol high), отдельная сессия. Самостоятельно проектирует T2 по требованиям, матрице рисков, frozen manifest и отчёту T1; не повторяет полный T1 без причины. Изменённые входы аннулируют PASS. Reuse — только одна попытка, функция, роль, настройки, измеренный контекст ≤50%.

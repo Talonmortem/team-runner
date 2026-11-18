@@ -113,7 +113,7 @@ class Verification(unittest.TestCase):
 
     def test_cleanup_interruption_cannot_leave_reusable_pass(self):
         @contextmanager
-        def broken_cleanup():
+        def broken_cleanup(**kwargs):
             yield {}, None, None
             raise RuntimeError('cleanup receipt lost')
         output=self.root/'interrupted.json'
@@ -164,14 +164,60 @@ with acquire(sys.argv[1]) as (r,fd,m):
             self.assertGreater(receipt['wait_seconds'],.1);receipt['cleanup_inventory_complete']=True
         self.assertEqual(process.wait(),0)
 
+    def test_native_heavy_wait_is_recorded_and_continues_after_release(self):
+        self.native_heavy_wait(False)
+
+    def test_native_heavy_wait_rechecks_sources_before_spawning(self):
+        self.native_heavy_wait(True)
+
+    def native_heavy_wait(self, change_source):
+        import time
+        from team_runner.runner_store import lock
+        lease=self.root/'native-heavy.lock';attempt=self.root/'attempt'
+        output=attempt/'verification'/'queued.json';ran=self.root/'spawned'
+        code='''import sys
+from pathlib import Path
+from team_runner import heavy_resource,verification
+heavy_resource.default_path=lambda:Path(sys.argv[5])
+verification.run_check(sys.argv[1],sys.argv[2],sys.argv[3],
+ [sys.executable,'-c','from pathlib import Path;Path('+repr(sys.argv[7])+').touch()'],
+ 'fixture',{},sys.argv[4],sys.argv[6],heavy=True)
+'''
+        with lock(lease):
+            process=subprocess.Popen([sys.executable,'-c',code,str(self.repo),str(self.manifest),self.sha,
+                                      str(attempt),str(lease),str(output),str(ran)],
+                                     stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            self.addCleanup(lambda:process.poll() is None and process.kill())
+            deadline=time.monotonic()+5
+            while time.monotonic()<deadline:
+                if read_json(output,{}).get('status')=='waiting_resource':break
+                if process.poll() is not None:break
+                time.sleep(.01)
+            record=read_json(output,{})
+            self.assertEqual(record.get('status'),'waiting_resource')
+            self.assertEqual(record['result'],'UNKNOWN');self.assertFalse(ran.exists())
+            proof=Path(str(output)+'.resource-wait.json').read_bytes()
+            self.assertEqual(json.loads(proof)['check_id'],record['id'])
+            if change_source:(self.repo/'code/a.py').write_text('changed after queue\n')
+        _,error=process.communicate(timeout=10)
+        self.assertEqual(process.returncode,1 if change_source else 0,error.decode())
+        self.assertEqual(Path(str(output)+'.resource-wait.json').read_bytes(),proof)
+        if change_source:
+            self.assertFalse(ran.exists());self.assertEqual(read_json(output)['result'],'UNKNOWN')
+        else:
+            self.assertTrue(ran.exists());self.assertEqual(read_json(output)['result'],'PASS')
+
 
 class Events(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.attempt=self.tmp.name
         self.state={'run_id':'parent','current':{'attempt_dir':self.attempt,'dispatch_id':'coord','terminal':'term',
-            'messages':[{'id':'m','run_id':'child','type':'worker_done'}]}}
+            'messages':[{'id':'m','run_id':'child','type':'worker_done','payload':{'dispatchId':'worker'}}]}}
         self.runner=Mock();self.runner.load_state.return_value=self.state
+        self.runner.launcher.registry.return_value = {'agents': [
+            {'id':'coordinator','role':'coordinator','dispatch_id':'coord','run_id':'parent','status':'active'},
+            {'id':'tester','role':'tester','dispatch_id':'worker','run_id':'child','status':'active'}], 'runs': []}
         self.runner.context.orca_id='workspace';self.runner.launch_permission.return_value=nullcontext()
         self.live={'dispatch':{'id':'coord','status':'dispatched','assigneeHandle':'term','processIncarnation':'pty:inc'},
             'terminal':{'handle':'term','ptyId':'pty','incarnationId':'inc','worktreeId':'workspace'},
@@ -220,7 +266,9 @@ class Events(unittest.TestCase):
         self.assertTrue(all(c.args[:2]==('orchestration','request-show') for c in self.runner.orca.call_args_list))
 
     def test_multiple_events_are_one_notification(self):
-        self.state['current']['messages'].append({'id':'m2','run_id':'child','type':'question'})
+        self.runner.launcher.registry.return_value['agents'].append(
+            {'id':'other','role':'tester','dispatch_id':'other-worker','run_id':'child','status':'active'})
+        self.state['current']['messages'].append({'id':'m2','run_id':'child','type':'question','payload':{'dispatchId':'other-worker'}})
         events.capture(self.runner,self.state,now=1)
         events.tick(self.runner,self.state,now=61)
         self.assertEqual(len(self.sends),1)
@@ -318,6 +366,7 @@ class Events(unittest.TestCase):
         other=copy.deepcopy(self.state);other['run_id']='other-parent'
         other['current'].update(attempt_dir=other_attempt,dispatch_id='other-coord',terminal='other-term')
         other_runner=Mock()
+        other_runner.launcher.registry.return_value = self.runner.launcher.registry.return_value
         events.capture(other_runner,other,now=0)
         path=events.paths(other_attempt)[0];before=path.read_bytes()
         events.tick(self.runner,self.state,now=1)

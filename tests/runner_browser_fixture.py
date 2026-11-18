@@ -223,6 +223,10 @@ class OrcaFixture:
                 if self.messages:
                     return {'messages': self.messages[:1], 'deliveryId': self.messages[0]['id']}
                 return {'messages': []}
+            if op == ('orchestration', 'send'):
+                return {'message': {'id': 'message-' + value('--retry-request'),
+                        'to_handle': value('--to'), 'run_id': value('--run')},
+                        'mutation': {'requestId': value('--retry-request')}}
             if op == ('orchestration', 'reply'):
                 dispatch = value('--id').removeprefix('question-')
                 if value('--body') == 'complete':

@@ -63,7 +63,12 @@ def state_view(runner):
     from .coordinator_events import view as events_view
     from .verification import view as verification_view
     active = next((item for item in queue if (cur.get('item') or '').split('/')[-1] == item['id']), {})
-    return {'events': events_view(cur.get('attempt_dir')),
+    from .event_scope import messages as classified_messages
+    from .autonomy import view as autonomy_view
+    st = dict(st, current=dict(cur, messages=classified_messages(cur, agents))) if cur else st
+    from .state_time import view as time_view
+    from .network_recovery import view as network_view
+    return {'time': time_view(runner), 'network': network_view(runner), 'autonomy': autonomy_view(runner), 'events': events_view(cur.get('attempt_dir')),
             'verification': verification_view(cur.get('attempt_dir'), runner.attempt_profile()['checks'], active.get('check_scope', 'item')),
             'state': st, 'health': {'state': 'error' if error else 'ok', 'error': error},
             'recovery': recovery_view(runner),
@@ -221,7 +226,7 @@ def write_configuration(runner, data):
 
 
 CONTROL_ACTIONS = frozenset(('pause', 'stop', 'retry', 'resolve', 'reply',
-                             'reconcile', 'continue-operation'))
+                             'reconcile', 'continue-operation', 'autonomy', 'resolve-escalation'))
 
 
 def _submit_command(runner, action, data, request_id):
@@ -230,6 +235,10 @@ def _submit_command(runner, action, data, request_id):
         raise ValueError('request_id required')
     data = dict(data)
     _execution_scope(runner, runner.load_state())  # Refuse mutations of unsupported intent versions.
+    if action == 'autonomy':
+        raise ContractError('invalid_scope', 'Autonomy requires a versioned command with scope/revision')
+    if action == 'resolve-escalation':
+        raise ContractError('invalid_scope', 'Escalation resolution requires a versioned command with scope/revision')
     if action in CONTROL_ACTIONS:
         return runner.submit_control(action, data, request_id)
     if action not in ('start', 'focus', 'configure', 'recovery'):
@@ -265,6 +274,13 @@ def _submit_command(runner, action, data, request_id):
 
 def _control_payload(action, payload):
     """Reject transport-only/internal fields before a command reaches the owner."""
+    if action == 'autonomy':
+        if (not isinstance(payload, dict) or set(payload) - {'enabled', 'unlimited_passes'}
+                or type(payload.get('enabled')) is not bool
+                or type(payload.get('unlimited_passes', False)) is not bool
+                or (payload.get('unlimited_passes') and not payload['enabled'])):
+            raise ContractError('invalid_payload', 'enabled boolean required; unlimited_passes requires enabled autonomy')
+        return
     if action == 'recovery':
         if not isinstance(payload, dict) or set(payload) != {'enabled'} or type(payload['enabled']) is not bool:
             raise ContractError('invalid_payload', 'enabled boolean required')
@@ -274,8 +290,9 @@ def _control_payload(action, payload):
             raise ContractError('invalid_payload', 'Configuration must be an object')
         return
     fields = {'pause': set(), 'stop': set(), 'reconcile': set(),
-              'retry': {'force', 'refresh', 'allow_extra_attempt', 'saved_settings'},
+              'retry': {'force', 'refresh', 'refresh_context', 'allow_extra_attempt', 'saved_settings'},
               'reply': {'message_id', 'text', 'run_id'}, 'resolve': {'choice'},
+              'resolve-escalation': {'message_id', 'text', 'run_id'},
               'continue-operation': {'operation_id'}}
     if not isinstance(action, str) or action not in fields:
         raise ContractError('unknown_action', 'Unsupported command action')
@@ -285,10 +302,10 @@ def _control_payload(action, payload):
         raise ContractError('invalid_payload', 'Retry options must be booleans')
     if action == 'retry' and payload.get('saved_settings') and not payload.get('refresh'):
         raise ContractError('invalid_payload', 'saved settings require explicit refresh')
-    if action == 'reply' and (not isinstance(payload.get('message_id'), str) or not payload['message_id']
+    if action in ('reply', 'resolve-escalation') and (not isinstance(payload.get('message_id'), str) or not payload['message_id']
             or not isinstance(payload.get('text'), str) or not payload['text'].strip() or len(payload['text']) > 32000):
         raise ContractError('invalid_payload', 'Reply requires message_id and 1..32000 characters')
-    if action == 'reply' and 'run_id' in payload and (not isinstance(payload['run_id'], str)
+    if action in ('reply', 'resolve-escalation') and 'run_id' in payload and (not isinstance(payload['run_id'], str)
             or not payload['run_id'] or len(payload['run_id']) > 512):
         raise ContractError('invalid_payload', 'run_id must be a nonempty run identifier')
     if action == 'resolve' and payload.get('choice') not in ('start', 'skip', 'stop'):
@@ -356,6 +373,9 @@ def _submit_v1(runner, command):
             runner.context.check_attempt(os.environ['TEAM_RUNNER_ATTEMPT'])
         record = {'schema_version': 1, 'id': identifier, 'action': command['action'],
                   'command': command, 'guard': guard, 'status': 'pending', 'result': None, 'error': None}
+        if command['action'] == 'autonomy':
+            from .autonomy import policy
+            record['policy_revision'] = policy(runner)['revision']
         atomic_json(path, record)
     # No nested commands.lock -> runner.lock: the long-lived owner also reads commands.
     if not running(runner.state_dir):
@@ -395,6 +415,10 @@ def process_v1(runner, state, path, record):
         _check_identity(runner, command['scope']['identity'])
         if record['guard'] != _execution_scope(runner, state):
             raise ContractError('stale_scope', 'Command belongs to a previous execution')
+        if record['action'] == 'autonomy':
+            from .autonomy import policy
+            if record.get('policy_revision') != policy(runner)['revision']:
+                raise ContractError('stale_revision', 'Autonomy policy changed before application')
         # Guard failure has no intent or external effects. Persist running first.
         record['status'] = 'running'
         atomic_json(path, record)
@@ -405,7 +429,13 @@ def process_v1(runner, state, path, record):
                 record['stop_guard'] = _execution_scope(runner, state)
                 atomic_json(path, record)
         data = dict(command['payload'], _target=record['guard']['attempt'])
-        if record['action'] == 'recovery':
+        if record['action'] == 'autonomy':
+            from .autonomy import configure
+            result = configure(runner, command['payload']['enabled'], record['id'], expected=record['guard'],
+                               unlimited_passes=command['payload'].get('unlimited_passes', False))
+            state.setdefault('applied_commands', []).append(record['id'])
+            runner.save_state(state)
+        elif record['action'] == 'recovery':
             from .recovery import configure
             result = configure(runner, command['payload']['enabled'])
         elif record['action'] == 'configure':

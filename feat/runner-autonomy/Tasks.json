@@ -1,6 +1,6 @@
 {
   "date": "2026-11-14",
-  "status": "not_started",
+  "status": "completed",
   "objective": "Ограниченная автономность и восстановление текущих сессий Team Runner",
   "invariants": [
     "Immutable attempt snapshots",
@@ -13,39 +13,125 @@
   "queue": [
     {
       "id": "events",
-      "status": "not_started"
+      "status": "completed"
     },
     {
       "id": "autonomy",
-      "status": "not_started"
+      "status": "completed"
     },
     {
       "id": "network",
-      "status": "not_started"
+      "status": "completed"
     },
     {
       "id": "visibility",
-      "status": "not_started"
+      "status": "completed"
     },
     {
       "id": "verification",
-      "status": "not_started"
+      "status": "completed"
     },
     {
       "id": "review",
-      "status": "not_started"
+      "status": "completed"
     },
     {
       "id": "rollout",
-      "status": "not_started"
+      "status": "completed"
+    },
+    {
+      "id": "resource-observation",
+      "status": "completed",
+      "depends_on": [],
+      "acceptance": "Native wait evidence and conservative host lease probe",
+      "verification": {
+        "status": "passed",
+        "checks": [
+          "Offline exclusive lease contention; clean release; incomplete cleanup residue; source recheck after queue"
+        ],
+        "evidence": [
+          "Two isolated process contention regressions PASS: native waiting_resource and frozen source recheck before spawn; actual tests use temporary lease only."
+        ]
+      }
+    },
+    {
+      "id": "resource-resume",
+      "status": "completed",
+      "depends_on": [
+        "resource-observation"
+      ],
+      "acceptance": "Scoped coordinator resource-wait registration and owner-queued continuation; optional existing question reply",
+      "verification": {
+        "status": "passed",
+        "checks": [
+          "Exact current coordinator/question/check identity; pause/stop/generation guards; no unknown-effect replay; linked escalation closure only after receipt"
+        ],
+        "evidence": [
+          "222 focused tests PASS (27.634s), including 18 resource-wait regressions; final extra same-second timestamp regression PASS."
+        ]
+      }
+    },
+    {
+      "id": "resource-verification",
+      "status": "completed",
+      "depends_on": [
+        "resource-resume"
+      ],
+      "acceptance": "Focused tests and independent review",
+      "verification": {
+        "status": "passed",
+        "checks": [
+          "Focused verification/autonomy/protocol/CLI tests; git diff --check; independent reviewer findings closed"
+        ],
+        "evidence": [
+          "Independent reviewer: four reproduced findings fixed with regressions; final review no significant findings.",
+          "git diff --check PASS; 222 focused tests PASS (27.634s); final same-second timestamp regression PASS."
+        ]
+      }
+    },
+    {
+      "id": "resource-rollout",
+      "status": "completed",
+      "depends_on": [
+        "resource-verification"
+      ],
+      "acceptance": "Preserved-session SHM reload and monitoring",
+      "verification": {
+        "status": "passed",
+        "checks": [
+          "Production owner/service reload preserves current attempt/sessions/snapshots/reports and other service nonces; 30-minute run monitoring"
+        ],
+        "evidence": [
+          "evidence/shm-monitor/resource-wait-rollout-20261116.json:completed; exact session identities/snapshots/accepted reports and other service nonces retained; coordinator operational notice accepted."
+        ]
+      }
     }
   ],
-  "verification": [],
-  "latest_attempt": null,
+  "verification": [
+    "664 full unittest tests PASS (134.802s)",
+    "109 final targeted tests PASS, including 23 autonomy scenarios",
+    "3 standalone helper suites PASS",
+    "Isolated browser: 5 assertions, 3 state screenshots, no console errors or duplicate IDs",
+    "Independent reviewer: no remaining findings; interrupted receipt lineage checked",
+    "node --check and git diff --check PASS",
+    "SHM journaled autonomy/recovery enabled; same attempt, snapshots and accepted reports preserved; active agent identities unchanged",
+    "SHM project service refreshed; other project service nonces unchanged",
+    "Production supervisor: confirmed tester timeout, one continuation accepted, no replacement; processing unconfirmed",
+    "Second independent review: 3 findings fixed plus ROOT manual receipt reconciliation defect; closure clean",
+    "Post-review: 211 focused tests PASS (33.483s), including 29 autonomy regressions; reviewer independently ran 8 cases PASS",
+    "Post-review SHM owner/service reload complete; snapshots, accepted reports and active agent identities preserved; other services unchanged",
+    "Production monitoring: fresh exact working evidence closes only prior technical stop; business questions and newer errors remain active. 80 focused PASS; independent re-review clean. SHM owner/service reload preserved existing sessions; observed running/blocker null.",
+    "Answered-decision regression: live recovery closes resolved cleanup-only incident, preserves unresolved decisions/technical fences and original command evidence; 77 focused PASS (10.667s). Only SHM service reloaded; no agent restart.",
+    "Production owner crash fixed: non-object verification appendix cannot crash state-time observation; 79 focused PASS, 2 final regressions PASS. Same-attempt owner restoration retained agent identities and accepted reports. Dead-owner diagnostic clears only with exact live process/boot/launch identity and no pending effects/decisions.",
+    "Explicit user-authorized unlimited_passes policy:82 focused PASS; independent source/recovery review, fixture correction, node/diff PASS. SHM revision2 live, automatic used4 beyond former cap, same attempt/snapshots/agents preserved; pending decisions/unknown effects/pause/stop still block grants.",
+    "Network outage recovery: 127 focused PASS (23.029s); independent cleanup and durable crash-phase reviews clean. Exact external cleanup plus same-ID replacement continuation through lost abandon/close/terminal/dispatch/handoff receipts; no unknown-effect replay. User-requested coordinator/tester recreation and subsequent runner reload preserved attempt/tasks/call/snapshots/reports/other services.",
+    "Heavy resource waiting: 222 focused PASS (27.634s), final19 resource-wait regressions PASS (4.439s); four independent-review findings reproduced/fixed, closure clean. Native waiting_resource + immutable wait proof, exact coordinator wait-resource registration, owner-queued continuation/optional reply, no replay or automatic acceptance; SHM owner/service rollout completed preserving sessions/snapshots/reports/other services."
+  ],
+  "latest_attempt": "2026-11-16: User-requested heavy-resource recovery fix implemented and reviewed. Native waiting_resource evidence and explicit coordinator wait-resource prevent ROOT-dependent lease recovery.222focusedPASS; final19resource regressionsPASS; four reviewer findings fixed. SHM rollout completed preserving current attempt/sessions and accepted evidence; target coordinator informed via journaled notice.30-minute run monitoring continues.",
   "execution_rules": [
     "Сохранить существующие изменения",
     "Без commit и смены ветки",
     "Изолированные тесты и браузер; затем общий unittest и независимое ревью"
   ],
-  "panel_state": "not_started"
+  "panel_state": "completed"
 }

@@ -69,7 +69,9 @@ class Cleanup(Fixture):
   self.assertEqual(release.call_args.args[2]["outcome"], "failed")
   self.assertTrue(st["current"]["failed"])
  def test_timeout_replays_read_without_relaunch(self):
-  _,st=self.attempt()
+  attempt,st=self.attempt()
+  store.atomic_json(attempt/'agents.json', {'agents':[{'id':'coordinator','role':'coordinator',
+      'dispatch_id':'owned','run_id':st['run_id'],'status':'active'}], 'runs':[], 'fenced':False})
   receipt={'messages':[{'id':'done','type':'worker_done','payload':{'dispatchId':'owned','outcome':'succeeded'},'body':'ok'}]}
   with patch.object(runner,'process_controls'),patch.object(runner,'poll_children'),patch.object(runner,'poll_outputs'),patch.object(runner,'orca',side_effect=[subprocess.TimeoutExpired('check',10),receipt]) as call,patch('team_runner.engine.time.sleep'),patch.object(launch,'launch') as spawn:
    self.assertEqual(runner.wait_coordinator(st)['outcome'],'succeeded')

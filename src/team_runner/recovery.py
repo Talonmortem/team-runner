@@ -40,6 +40,9 @@ def set_intent(runner, intent, *, new_start=False):
         raise ValueError('invalid recovery intent')
     from .goal_intent import change
     change(runner, desired_state=intent)
+    if intent in ('paused', 'stopped'):
+        from .network_recovery import cancel
+        cancel(runner, intent + ' cancels scheduled network recovery')
     with lock(runner.state_dir / 'recovery-settings.lock'):
         path = runner.state_dir / 'recovery-settings.json'
         value = settings(runner)
@@ -136,6 +139,9 @@ class Supervisor:
         """Schedule technical work through the live owner's existing command queue."""
         cur = st.get('current') or {}
         attempt = target(st)
+        from .network_recovery import supervise
+        if supervise(self, runner, st):
+            return
         registry = runner.launcher.registry(cur['attempt_dir']) if cur.get('attempt_dir') else {'agents': [], 'runs': []}
         unsettled = bool(registry.get('fenced')) or any(a.get('status') in ('launching', 'unknown', 'ready', 'restart_ready') or a.get('error') or a.get('cleanup_error')
                         for a in registry['agents'])
@@ -154,6 +160,28 @@ class Supervisor:
                     sort_keys=True).encode()).hexdigest()
         journal_path = runner.state_dir / 'recovery.json'
         journal = read_json(journal_path, {})
+        from .event_scope import pending
+        decision = (cur.get('failed') or cur.get('problems') or 'acceptance_rework' in cur
+                    or (cur.get('gate_id') and not cur.get('gate_resolved'))
+                    or pending(cur, registry))
+        if (journal.get('target') == attempt and journal.get('mode') == 'dead'
+                and journal.get('reason') == 'runner no longer owns process lock'
+                and not unsettled and not decision and not st.get('last_error')):
+            from .project_services import departed
+            from .runner_entry import boot_id, process_stamp
+            process = read_json(runner.state_dir / 'runner-process.json', {})
+            launch = read_json(runner.state_dir / 'launch.json', {})
+            if (process.get('identity') == runner.context.identity() == launch.get('identity')
+                    and process.get('nonce') and process['nonce'] == launch.get('nonce')
+                    and type(process.get('pid')) is int and process['pid'] > 0
+                    and process.get('process_stamp') and process_stamp(process['pid']) == process['process_stamp']
+                    and process.get('boot_id') and process['boot_id'] == boot_id()
+                    and not departed(process)):
+                journal.update(mode='live', status='observing', phase='completed', reason=None,
+                               next_check_at=None, next_step='observe runner', signature=signature,
+                               resolved_owner_nonce=process['nonce'])
+                atomic_json(journal_path, journal)
+                return
         if (journal.get('target') != attempt or journal.get('mode') != 'live'
                 or (journal.get('status') == 'observing' and journal.get('signature') != signature)):
             if not unsettled:
@@ -178,6 +206,15 @@ class Supervisor:
             return
         if command.get('error'):
             journal['reason'] = command['error']
+            if command['error'] == 'acceptance or user decision required; technical cleanup completed':
+                if not unsettled and not decision:
+                    journal.update(status='observing', phase='completed', reason=None,
+                                   action='technical cleanup completed', next_check_at=None,
+                                   next_step='observe runner', signature=signature,
+                                   completed_command_id=command_id)
+                    journal.pop('command_id', None)
+                    atomic_json(journal_path, journal)
+                    return
             if 'acceptance or user decision required' in command['error'] or 'cancelled by user intent' in command['error']:
                 journal.update(status='needs_action', next_check_at=None, next_step='review current attempt')
                 atomic_json(journal_path, journal)
@@ -277,8 +314,10 @@ class Supervisor:
                     if target(st) != attempt or settings(runner)['intent'] != intent:
                         return
                     process = read_json(runner.state_dir / 'runner-process.json', {})
-                    if not process:
-                        launch = read_json(runner.state_dir / 'launch.json', {})
+                    launch = read_json(runner.state_dir / 'launch.json', {})
+                    if not process or (process.get('nonce') != launch.get('nonce')
+                                       and process.get('identity') == runner.context.identity()
+                                       and departed(process)):
                         nonce = launch.get('nonce')
                         marker = read_json(runner.state_dir / 'startup' / ('runner-' + str(nonce) + '.entry.json'), {})
                         expected = 'runner-' + str(nonce) + ':' + str((runner.state_dir / 'startup').resolve())
@@ -319,10 +358,11 @@ class Supervisor:
                         runner.apply_control(st, 'stop', {})
                         journal.update(status='observing', phase='completed', next_step='stopped')
                     else:
+                        from .event_scope import pending
                         own_stop = (journal.get('coordinator_retry') and st.get('stop_requested'))
                         if (cur.get('failed') or cur.get('problems') or 'acceptance_rework' in cur or st.get('paused') or (st.get('stop_requested') and not own_stop)
                                 or (cur.get('gate_id') and not cur.get('gate_resolved'))
-                                or any(m.get('type') in ('question', 'escalation') and not m.get('closed') and not m.get('answered') for m in cur.get('messages', []))):
+                                or pending(cur, runner.launcher.registry(cur['attempt_dir']) if cur.get('attempt_dir') else {})):
                             journal.update(status='needs_action', reason='acceptance or user decision required', next_step='review current attempt')
                             atomic_json(journal_path, journal)
                             return

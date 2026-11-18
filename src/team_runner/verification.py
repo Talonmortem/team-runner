@@ -202,6 +202,39 @@ def accept_gate(checkout, item):
     atomic_json(path, receipt)
 
 
+def fixture_preflight(checkout, paths):
+    """Cheap fixture structure checks before acquiring resources or spawning a harness."""
+    from html.parser import HTMLParser
+    class IDs(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.ids = set()
+        def handle_starttag(self, tag, attrs):
+            for key, value in attrs:
+                if key == 'id':
+                    if value in self.ids:
+                        raise ValueError('fixture ID conflict: ' + str(value))
+                    self.ids.add(value)
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('fixture JSON key conflict: ' + key)
+            result[key] = value
+        return result
+    for name in paths:
+        path = inside(checkout, name)
+        if not path.is_file():
+            raise ValueError('fixture missing: ' + name)
+        if path.suffix == '.html':
+            parser = IDs()
+            parser.feed(path.read_text())
+            parser.close()
+        elif path.suffix == '.json':
+            json.loads(path.read_text(), object_pairs_hook=unique)
+    return {'result': 'PASS', 'files': paths}
+
+
 def run_check(checkout, manifest, expected, command, toolchain, environment, attempt, output,
               heavy=False, copy=None):
     from contextlib import nullcontext
@@ -209,18 +242,32 @@ def run_check(checkout, manifest, expected, command, toolchain, environment, att
     preflight = verify(checkout, manifest, expected, copy)
     atomic_json(str(output) + '.preflight.json', preflight)
     inputs = evidence_inputs(preflight, command, toolchain, environment, True)
+    frozen = read_json(manifest)
+    fixtures = [name for name in frozen['files'] if 'fixtures' in Path(name).parts or Path(name).suffix == '.html']
+    structural = fixture_preflight(copy or checkout, fixtures)
+    atomic_json(str(output) + '.fixtures.json', structural)
     output = Path(output)
     if output.exists():
         raise ValueError('evidence output already exists; never overwrite a result')
     record = {'id': str(uuid.uuid4()), 'attempt': attempt, 'inputs': inputs, 'result': 'UNKNOWN',
               'status': 'required', 'logs': [], 'created_at': time.time()}
     atomic_json(output, record)
-    lease = acquire() if heavy else nullcontext(({}, None, None))
+    def waiting(resource):
+        proof = dict(resource, check_id=record['id'], attempt=attempt)
+        target = Path(str(output) + '.resource-wait.json')
+        if target.exists():
+            raise ValueError('resource wait evidence already exists')
+        atomic_json(target, proof)
+        record.update(status='waiting_resource', resource_wait=proof)
+        atomic_json(output, record)
+    lease = acquire(on_wait=waiting) if heavy else nullcontext(({}, None, None))
     with lease as (resource, fd, metadata):
         # Recheck after waiting for the host resource.
         fresh = verify(checkout, manifest, expected, copy)
         if fresh['result'] != 'PASS':
             raise ValueError('inputs changed while waiting for resource')
+        record.update(status='running', started_at=time.time())
+        atomic_json(output, record)
         started = time.monotonic()
         log = Path(str(output) + '.log')
         with log.open('xb') as stream:
@@ -237,7 +284,7 @@ def run_check(checkout, manifest, expected, command, toolchain, environment, att
         postflight = verify(checkout, manifest, expected, copy)
         atomic_json(str(output) + '.postflight.json', postflight)
         record.update(result='PASS' if code == 0 and postflight['result'] == 'PASS' else 'FAIL',
-                      status='executed', exit_code=code, postflight=postflight.get('inputs')
+                      status='executed', finished_at=time.time(), exit_code=code, postflight=postflight.get('inputs')
                       if postflight['result'] == 'PASS' else None,
                       execution_seconds=time.monotonic() - started,
                       wait_seconds=resource.get('wait_seconds', 0),

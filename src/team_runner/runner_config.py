@@ -89,9 +89,10 @@ def get_template(name):
         return cfg
     if name == 'openai-only':
         for role in ('coordinator', 'final_reviewer_critical', 'escalation_expert'):
+            coordinator = role == 'coordinator'
             cfg['roles'][role] = {'agent': 'codex', 'profile': '', 'provider': 'codex-lb',
-                                  'model': 'gpt-6.1-sol',
-                                  'effort': 'medium' if role == 'coordinator' else 'high'}
+                                  'model': 'gpt-6.2-sol' if coordinator else 'gpt-6.2-astra',
+                                  'effort': 'medium' if coordinator else 'high'}
         return cfg
     models = {'opus': 'claude-opus-4.8', 'gpt': 'gpt-5.5',
               'flash': 'deepseek-v4.1-flash'}
@@ -369,7 +370,7 @@ def apply_coordinator_overrides(c, overrides, catalog, config_root):
     overrides = {k: v for k, v in (overrides or {}).items() if v is not None}
     previous = dict(c)
     if overrides.get('agent') and overrides['agent'] != c['agent']:
-        c.update(agent=overrides['agent'], profile='', provider='', model='gpt-6.1-sol', effort='high')
+        c.update(agent=overrides['agent'], profile='', provider='', model='gpt-6.2-sol', effort='high')
         if c['agent'] == 'claude':
             c.update(provider='current', model='claude-opus-5-5', effort='high')
         elif c['agent'] == 'opencode2':

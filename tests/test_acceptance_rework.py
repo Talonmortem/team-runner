@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -5,6 +6,44 @@ from test_goal_runner import Fixture, runner, launch, store
 
 
 class AcceptanceRework(Fixture):
+    def test_item_commit_requires_current_review_and_committed_acceptance(self):
+        attempt, st = self.attempt()
+        context = store.read_json(attempt / 'context.json')
+        context['profile']['workflow'].update(allow_commits=True, commit_after_review=True)
+        store.atomic_json(attempt / 'context.json', context)
+        goal = runner.repo / 'feat/goal'
+        tracking = goal / 'feature/Tasks.json'
+        store.atomic_json(goal / 'Tasks.json', {'queue': [{'id': 'F', 'path': 'feature'}]})
+        store.atomic_json(tracking, {'queue': [{'id': 'X', 'status': 'in_progress'}]})
+        def commit(subject, trailer=None):
+            args = ['-c', 'user.name=Test', '-c', 'user.email=test@example.test',
+                    'commit', '-m', subject]
+            runner.git(*args, *(['-m', f'Team-Runner-Item: {trailer}'] if trailer else []))
+        runner.git('add', '--', 'feat')
+        commit('base')
+        base = runner.git('rev-parse', 'HEAD').strip()
+        store.atomic_json(tracking, {'queue': [{'id': 'X', 'status': 'completed'}]})
+        artifact = goal / 'feature/evidence/x/acceptance.md'
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text('accepted\n')
+        unrelated = runner.repo / 'unrelated.txt'
+        unrelated.write_text('preserved\n')
+        def verify():
+            return runner.verify_item(SimpleNamespace(goal='feat/goal'), 'F/X', base, [])
+        self.assertTrue(any('one item commit' in p for p in verify()))
+        runner.git('add', '--', str(tracking), str(artifact))
+        commit('accept F/X', 'F/X')
+        self.assertTrue(any('independent final review' in p for p in verify()))
+        store.atomic_json(attempt / 'agents.json', {'agents': [
+            {'role': 'final_reviewer', 'dispatch_id': 'review', 'run_id': 'parent'}], 'runs': []})
+        st['current']['messages'] = [{'type': 'worker_done', 'run_id': 'parent',
+            'payload': {'dispatchId': 'review', 'outcome': 'succeeded'}}]
+        runner.save_state(st)
+        self.assertEqual(verify(), [])
+        self.assertEqual(runner.git('status', '--porcelain').strip(), '?? unrelated.txt')
+        artifact.write_text('changed after commit\n')
+        self.assertTrue(any('evidence must match' in p for p in verify()))
+
     def finish(self, st, problems, settled=True):
         with patch.object(runner, 'poll_children'), patch.object(runner, 'settle_children', return_value=settled) as settle, patch.object(launch, 'release_agent') as release, patch.object(runner, 'git', return_value='head'), patch.object(runner, 'notify'):
             accepted = runner.finish_item(None, st, {'outcome': 'succeeded', 'body': 'report'}, lambda: problems)
@@ -92,6 +131,9 @@ class AcceptanceRework(Fixture):
         self.assertTrue(any(isinstance(arg, str) and 'missing report' in arg for arg in effect.call_args.args))
         self.assertEqual(st['current']['acceptance_reworks'], 1)
         self.assertNotIn('acceptance_rework', st['current'])
+        reg = launch.registry(st['current']['attempt_dir'])
+        reg['agents'].append(dict(reg['agents'][0], id='replacement', dispatch_id='new'))
+        store.atomic_json(Path(st['current']['attempt_dir']) / 'agents.json', reg)
         receipt = {'messages': [{'id': 'new-done', 'type': 'worker_done', 'payload': {'dispatchId': 'new', 'outcome': 'failed'}, 'body': 'new report'}]}
         with patch.object(runner, 'process_controls'), patch.object(runner, 'poll_children'), patch.object(runner, 'poll_outputs'), patch.object(runner, 'orca', return_value=receipt) as check:
             self.assertEqual(runner.wait_coordinator(st)['body'], 'new report')

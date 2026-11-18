@@ -126,6 +126,33 @@ team-runner serve --port 8765
 
 Stop дожидается завершения принятых HTTP-запросов и останавливает только сервис проекта. Runner-процессы и их задачи продолжаются. Restart создаёт новый экземпляр лишь после подтверждённой остановки прежнего. CLI-команды задач по-прежнему работают напрямую с выбранным workspace.
 
+### Ограниченная автономность
+
+По умолчанию выключена. Политика хранится отдельно от снимка попытки и действует только
+для выбранного workspace и generation цели. Команда требует актуальных значений из `status --json`:
+
+```sh
+team-runner autonomy show --project PROJECT_UUID --workspace WORKSPACE_UUID
+team-runner autonomy set --project PROJECT_UUID --workspace WORKSPACE_UUID --enabled true \
+  --request-id REQUEST_UUID --generation GENERATION_UUID --attempt ATTEMPT_PATH --revision REVISION --json
+```
+
+`--enabled false` выключает политику. Дочерние агенты менять её не могут. Бюджет — три
+дополнительных прохода на связь за пункт, общий для всех попыток. Сетевое восстановление
+также требует включённого `recovery`: два продолжения текущей сессии (30 секунд, затем
+120 секунд после нового подтверждённого сбоя), затем одна замена той же роли после
+подтверждённой остановки. Молчание не запускает восстановление; неизвестная квитанция
+требует сверки существующей операции. Pause/stop отменяют запланированное действие.
+Бизнес-вопросы, неизвестные эффекты и исчерпанные бюджеты остаются блокировками.
+По явному разрешению владельца `autonomy set --enabled true --unlimited-passes true`
+с теми же scope/revision снимает потолок дополнительных проходов для текущей generation.
+История расходов сохраняется; вопросы, конфликты, неизвестные эффекты и pause/stop
+по-прежнему блокируют автоматическое разрешение. Сетевые лимиты не меняются.
+Следующая команда `autonomy set` без этого флага возвращает потолок в три прохода
+с учётом уже использованного бюджета; новая generation не наследует разрешение.
+Панель показывает причину ожидания, следующую операцию, остаток бюджета и непересекающиеся
+интервалы времени; пробелы наблюдения свыше 30 секунд учитываются как неизвестное время.
+
 ## Подключение проекта
 
 ```sh
@@ -168,7 +195,7 @@ Instructions/requirements — локальные относительные ил
 
 Встроенные редактируемые шаблоны: «Текущие агенты» (`current`), «Cloud.ru» (`cloudru`) и «OpenAI-only» (`openai-only`). UI заполняет черновик, сохранение действует на следующие попытки. CLI: `team-runner template list|show|apply [NAME] --project PROJECT_UUID --workspace WORKSPACE_UUID`. Снимки текущих попыток не переписываются.
 
-`openai-only`: все роли — Codex через `codex-lb`; координатор — `gpt-6.1-sol / medium`, критический ревьюер и эксперт эскалации — `gpt-6.1-sol / high`. Остальные роли и пустые резервы — как в `current`.
+`openai-only`: все роли — Codex через `codex-lb`; координатор — `gpt-6.2-sol / medium`, критический ревьюер и эксперт эскалации — `gpt-6.2-astra / high`. Остальные роли и пустые резервы — как в `current`.
 
 Конфигурация v2 содержит `template`, `roles`, `reserves`; v1 читается, старые обновления не стирают резервы. Добавлен `implementer_medium`: выбор реализации внутри утверждённого контракта. Полная таблица моделей и ролей — [MODELS.md](src/team_runner/MODELS.md).
 
@@ -374,6 +401,11 @@ API сервисов общего UI: `GET /api/services`, `GET /api/projects/PR
 
 ## Проверки
 
+Порядок сокращения возвратов: [roles-and-rules.md](src/team_runner/roles-and-rules.md#короткий-цикл-исправлений-решение-пользователя-2026-11-17).
+Исполнитель выполняет ранние дешёвые проверки; общий harness получает единый набор регрессий;
+связанные исправления проверяются пакетом; второй возврат класса требует диагностики и нового подхода.
+Новые материалы входят в будущие снимки; активной попытке решение передаётся отдельно с её точной областью, без изменения immutable materials.
+
 ```sh
 PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'
 PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_project_services.py'
@@ -409,6 +441,12 @@ SQLite OpenCode читается только для чтения; привяз�
 или неизвестная операция блокируют восстановление до проверки; повторный
 `worker_done` не требуется.
 
+Сверка startup сохраняет nonce и терминал запуска. Новый исполнитель удерживает
+checkout-lock и ждёт кратковременный runner-lock технической проверки. Если
+повторный запуск завершился до записи нового PID, восстановление проверяет его
+точный entry-marker только после подтверждённого завершения прежнего процесса;
+живой или чужой владелец не заменяется. Повторное использование nonce запрещено.
+
 ## Verification scope and coordinator events
 
 Profile checks may set `scope: "item"` or `scope: "stage"`. Omitted scope retains legacy behavior.
@@ -425,6 +463,15 @@ to the exact live coordinator's Dispatch mailbox; Orca schedules delivery even w
 or the agent is working. A queued message does not prove a started turn or processing. Unknown sends are only reconciled through
 request receipts; no automatic retransmission. Events older than five minutes appear in the UI and
 raise a desktop notification. Pause/stop and unknown identity prevent automatic notification.
+
+An operator can settle a reviewed escalation with a versioned `resolve-escalation` command
+through `team-runner command --file FILE` (or the commands API). Use the current summary's
+identity, generation, attempt and revision, a fresh request UUID, and payload
+`{"message_id":"MESSAGE","run_id":"RUN","text":"Decision and reason"}`.
+Only the named active, registered escalation closes; its original message and the decision
+remain recorded. This is distinct from processing ACKs. Questions, other escalations, unknown
+effects, graph budgets and acceptance gates retain their own guards. Child attempts cannot
+issue this control, and the legacy unscoped command path rejects it.
 
 Create a frozen manifest with `team-runner manifest create --checkout PATH --root backend --root frontend
 --root scripts --root config --manifest FILE`. Save its JSON receipt; feed the returned digest
@@ -452,6 +499,15 @@ Acquire before creating PostgreSQL; never nest the same lease. A crash with inco
 requires inspection; a released file lock alone does not establish cleanup. Queue wait and execution
 are measured separately. SHM starts with four DB shards and its retained duration log.
 
+While queued, native evidence reports `waiting_resource` and retains immutable
+`RESULT.resource-wait.json`; acquiring the lease rechecks the frozen inputs before spawning.
+With autonomy enabled, the exact current coordinator can register a checkpointed technical wait:
+`team-runner wait-resource --check RESULT --request-id UUID [--escalation-id ID]`, then end its turn.
+Runner queues one scoped continuation when the lease and cleanup evidence are ready. Existing
+technical questions may instead use `--question-id ID`. Only explicitly linked own resource
+escalations close after a confirmed receipt. Business questions, pause/stop, changed scope,
+unknown effects and unverified cleanup still block; no test is replayed or accepted automatically.
+
 При `workflow.sequential_agents=true` координатор запускает не более одного активного worker: следующий dispatch разрешён после подтверждённого завершения или остановки предыдущего. Политика фиксируется в context.json попытки; для старых снимков без поля поведение не меняется. Все роли используют текущий checkout и установленные зависимости; отдельные окружения, копии toolchain/node_modules и реестр сред не требуются.
 
 ### Shared Go cache and compact completion
@@ -463,3 +519,67 @@ Workers use `python3 -m team_runner.worker_report --help`: a short JSON result g
 Графовые команды: настройки открывают конфигурации v1/v2 как граф, сохранение редактора записывает v3. Один корневой координатор, произвольные агенты с повторяющимися ролями, связи delegation/rework, группы и позиции. Именованные профили общие для каталогов: `$XDG_CONFIG_HOME/team-runner/team-profiles.json`, HTTP `/api/team-profiles`. Выбор профиля меняет черновик; «Сохранить» применяет его к следующим попыткам. Снимки активных попыток не меняются.
 
 В v3 агент вызывает `team-runner delegate EDGE_ID --spec FILE --title TITLE --request-id UUID` и ждёт результат. Каждый вызов получает свежую сессию; `launch ROLE` допустим при одной подходящей исходящей связи. Исполняется один агент; предки сохраняют ожидающие сессии. CLI получает результат своей цепочки, mailbox читает только runner. Возврат через `team_runner.worker_report`: `outcome: "changes_requested"`, `return_edge: "EDGE_ID"`; связь rework должна вести к непосредственному вызывающему. Такой результат передаётся транспортом как failed и не удовлетворяет приёмке: необходима новая успешная проверка. Делегирование предку запрещено. По умолчанию у связи три прохода на попытку; повтор UUID не расходует проход повторно. Панель при исчерпании лимита предлагает один дополнительный проход или остановку. Разрешения хранятся отдельно от снимка. Неизвестные эффекты требуют reconciliation, автоматического повторного запуска нет.
+
+### Infrastructure observer
+
+`team-runner observer` runs a separate service with an explicit project allowlist.
+Use a dedicated registered Team Runner project/workspace: its ordinary Context,
+attempts, registry and mailboxes remain isolated from observed projects. Service
+roles are separate from product graph settings. V1 supports Codex service roles;
+each works from a stage artifact directory, with repository access read-only.
+
+Polling runs every 10 seconds. Periodic semantic review runs at most once an hour
+when meaningful new facts exist; identical state rewrites and elapsed timers
+alone do not trigger it. Agents receive bounded summaries of new facts with
+explicit omissions and references to immutable full evidence. Historical evidence
+remains available without being embedded in every diagnosis input. Specific
+failure and repeated-check detection retains its existing thresholds.
+The pending telemetry window retains the latest 100 meaningful transitions;
+overflow counts are explicit. Archives preserve captured evidence, not discarded
+telemetry rows.
+
+`observer status --json` returns the current `scope`. All mutations require that
+scope and a UUID `--request-id`; retries use the identical command and ID.
+`observer configure --file observer.json --scope SCOPE --request-id UUID` accepts:
+
+```json
+{
+  "project_id": "OBSERVER_PROJECT_UUID",
+  "workspace_id": "OBSERVER_WORKSPACE_UUID",
+  "projects": ["OBSERVED_PROJECT_UUID"],
+  "mode": "diagnostic",
+  "repair_roots": [{"path": "/absolute/infrastructure/tests", "kind": "test", "shared": false}],
+  "roles": {
+    "diagnose": {"agent": "codex", "profile": "", "provider": "codex-lb", "model": "gpt-6-luna", "effort": "high"},
+    "candidate": {"agent": "codex", "profile": "", "provider": "codex-lb", "model": "gpt-6.2-sol", "effort": "high"},
+    "review": {"agent": "codex", "profile": "", "provider": "codex-lb", "model": "gpt-6.2-sol", "effort": "high"},
+    "result": {"agent": "codex", "profile": "", "provider": "codex-lb", "model": "gpt-6-luna", "effort": "high"}
+  }
+}
+```
+
+Root kinds: `runner`, `test`, `environment`, `dependency`, `tool`. Existing regular
+files only; no product logic, weakened checks, policy/budget edits or automatic
+replacement of the observer's running Python package. Changes to loaded observer
+code require a separately controlled restart. Shared roots require independent
+complete user-inventory proof and the existing heavy resource lease. Active or
+unknown affected registered agents defer application to a safe point.
+
+`observer start`, `pause`, `stop`, and `mode --mode diagnostic|approval|auto` use
+`--scope SCOPE --request-id UUID`. `start` also resumes a paused observer.
+The existing manager supervises observer process lifecycle from its durable
+intent. Unknown process/transport/application effects are reconciled, never
+replayed. Stop settles already-started operations and result verification before
+exiting; it does not interrupt useful checks or working product agents.
+
+`observer incidents --json` includes evidence, diagnosis, exact plan, repair
+budget, stage actions and independent results. In `diagnostic`, agents recommend
+without applying changes. `approval` requires
+`observer approve --incident ID --plan PLAN_DIGEST --scope SCOPE --request-id UUID`
+before candidate preparation. The plan digest is SHA-256 of canonical sorted
+compact JSON (the `digest` function in `infra_observer`). New evidence invalidates
+approval. `auto` prepares a candidate, gets a fresh independent review, checks
+source/user/lease preconditions, applies exact replacement bytes, then obtains a
+fresh independent result check. Unknown application safety requests approval.
+One repair runs at a time; at most two candidate attempts per incident. A failed
+or unmeasured repair is never closed as successful.

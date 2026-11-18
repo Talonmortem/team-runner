@@ -72,7 +72,7 @@ function renderRole(role, cfg, reserve) {
         Object.assign(cfg, cfg.agent === 'opencode2' ? {profile: '', provider: 'cloudru',
           model: catalog.opencode2?.default_model || catalog.opencode2?.models?.[0] || '', effort: 'high'} :
           cfg.agent === 'claude' ? {profile: '', provider: 'current', model: 'claude-opus-5-5', effort: 'high'} :
-          {profile: '', provider: catalog.current_provider || '', model: roleDefaults.agent === 'codex' ? roleDefaults.model : 'gpt-6.1-sol',
+          {profile: '', provider: catalog.current_provider || '', model: roleDefaults.agent === 'codex' ? roleDefaults.model : 'gpt-6.2-sol',
             effort: roleDefaults.agent === 'codex' ? roleDefaults.effort : 'high'});
         renderSettings();
       }
@@ -326,7 +326,8 @@ function renderActions(target = selected) {
 }
 let currentDetail = null;
 function renderSummary(view, target) {
-  text('goal-state',!view.goal && view.observed_state === 'paused' ? 'Не запущена' : states[view.observed_state]);
+  const goalState = !view.goal && view.observed_state === 'paused' ? 'Не запущена' : states[view.observed_state];
+  text('goal-state', view.autonomy?.waiting_for_pass ? 'Ожидается автоматическое разрешение' : goalState);
   const noGoals = loadedTarget === target && !$('goal').options.length;
   const attempt = currentDetail?.state?.current?.attempt;
   $('status').textContent = `${view.goal || (noGoals ? 'Нет целей в tracking root. Проверьте профиль каталога в настройках.' : 'Выберите цель для запуска')} · ${view.current.item || 'Нет текущего пункта'}${view.current.attempt ? ' · попытка ' + (attempt || 'подготовлена') : ''}`;
@@ -355,7 +356,7 @@ function keepFocus(container, render) {
   }
 }
 function renderQuestions(cur, target) {
-  const questions = (cur.messages || []).filter(m => ['question','escalation'].includes(m.type) && !m.answered && !m.closed);
+  const questions = (cur.messages || []).filter(m => ['question','escalation'].includes(m.type) && !m.answered && !m.closed && (!m.classification || m.classification.kind === 'active'));
   const canReply = allowed('reply',target);
   const signature = JSON.stringify([canReply, questions.map(m => [target, summaries.get(target)?.generation, summaries.get(target)?.current.attempt, m.type, m.run_id, m.id, m.body])]);
   if ($('questions').dataset.signature === signature) return;
@@ -393,7 +394,19 @@ function renderQuestions(cur, target) {
   }
 }
 function renderDetails(v, target) {
+  const st = v.state, cur = st.current || {};
   renderGraphLimits(v, target);
+  const autonomy = v.autonomy || {};
+  const waitLabels = {agent_work:'работа агента',checks:'проверки',coordinator_wait:'ожидание координатора',network_wait:'ожидание сети',limit_wait:'ожидание лимита',user_wait:'ожидание решения',unknown:'неизвестно'};
+  text('autonomy-status', `Автономность: ${autonomy.enabled ? 'включена' : 'выключена'}`);
+  text('autonomy-budget', Object.entries(autonomy.budgets || {}).map(([edge,b]) => b.limit === null ? `${edge}: использовано ${b.used}, без лимита` : `${edge}: использовано ${b.used}/${b.limit}, осталось ${b.remaining}`).join(' · ') || 'Дополнительные проходы не использованы');
+  const network = v.network || {sessions:[]};
+  const next = network.next_operation;
+  text('wait-reason', network.sessions.find(s => s.status === 'needs_action')?.reason || `Текущее состояние: ${waitLabels[v.time?.last?.kind] || 'неизвестно'}`);
+  text('next-operation', next ? `Следующая операция: ${next.action === 'replace' ? 'замена сессии' : 'продолжение сессии'}${next.at ? ' · ' + new Date(next.at * 1000).toLocaleString() : ' · в очереди владельца runner'}` : 'Автоматическая операция не запланирована');
+  text('time-summary', Object.entries(v.time?.seconds || {}).map(([key,seconds]) => `${waitLabels[key] || key}: ${Math.round(seconds)} с`).join(' · '));
+  text('state-time', JSON.stringify(v.time || {}, null, 2));
+  text('event-diagnostics', JSON.stringify((cur.messages || []).filter(m => m.classification?.kind !== 'active'), null, 2));
   const events = v.events || {events:[],overdue:0};
   $('event-warning').textContent = events.overdue ? `Не обработано более 5 минут: ${events.overdue}` : '';
   const checks = v.verification || {checks:[],records:[]};
@@ -401,10 +414,9 @@ function renderDetails(v, target) {
   const labels = {executed:'Выполнено сейчас',reused:'Подтверждено по прежнему результату',required:'Требуется проверка',not_applicable:'Не применимо'};
   for (const check of checks.checks) node('p',`${labels[check.status] || check.status}: ${check.command.join(' ')}`,$('verification'));
   for (const record of checks.records) node('p',`${labels[record.status] || record.status}: ${record.result}`,$('verification'));
-  const coordinatorWait = events.events.reduce((sum,e) => sum + (e.coordinator_wait_seconds || (e.processed_at ? 0 : Date.now()/1000-e.created_at)),0);
+  const coordinatorWait = v.time?.seconds?.coordinator_wait || 0;
   node('p',`Ожидание координатора: ${Math.round(coordinatorWait)} с; очередь ресурса: ${Math.round(checks.resource_wait_seconds || 0)} с; выполнение: ${Math.round(checks.execution_seconds || 0)} с; повторы: ${checks.repeats || 0}`,$('verification'));
 
-  const st = v.state, cur = st.current || {};
   const detailAttempt = cur.attempt_dir || cur.dispatch_id || cur.item || null;
   if (detailAttempt === summaries.get(target)?.current.attempt) renderQuestions(cur,target);
   else {$('questions').replaceChildren();delete $('questions').dataset.signature;}

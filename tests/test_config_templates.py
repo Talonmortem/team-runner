@@ -39,8 +39,11 @@ class Templates(unittest.TestCase):
         for role in cfg['roles'].values():
             self.assertEqual((role['agent'], role['provider']), ('codex', 'codex-lb'))
             self.assertTrue(role['model'].startswith('gpt-'))
-        self.assertEqual(cfg['roles']['coordinator']['model'], 'gpt-6.1-sol')
+        self.assertEqual(cfg['roles']['coordinator']['model'], 'gpt-6.2-sol')
         self.assertEqual(cfg['roles']['coordinator']['effort'], 'medium')
+        for key in ('final_reviewer_critical', 'escalation_expert'):
+            self.assertEqual(cfg['roles'][key]['model'], 'gpt-6.2-astra')
+            self.assertEqual(cfg['roles'][key]['effort'], 'high')
         self.assertTrue(all(v is None for v in cfg['reserves'].values()))
         (self.home / 'config.json').write_text(json.dumps(cfg))
         self.assertEqual(config.load_config(self.home, catalog=self.catalog), cfg)

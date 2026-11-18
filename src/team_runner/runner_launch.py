@@ -128,7 +128,8 @@ class Launcher:
         """
         if read_json(Path(attempt) / 'config.json', {}).get('version') == 3:
             from .graph_dispatch import guard
-            record = next((a for a in reg['agents'] if task_id and a.get('task_id') == task_id), None)
+            record = next((a for a in reg['agents'] if task_id and a.get('task_id') == task_id
+                           and not a.get('superseded_by') and a.get('status') != 'superseded'), None)
             if record is None:
                 raise ValueError('graph launch requires registered call identity')
             guard(self, attempt, reg, record)
@@ -254,13 +255,13 @@ class Launcher:
         return old
 
 
-    def _launch(self, attempt, reg, record, title, state_dir, retry_of=None, permitted=None):
+    def _launch(self, attempt, reg, record, title, state_dir, retry_of=None, permitted=None, reconciled_control=None):
         self.sequential_guard(attempt, reg, record['role'], record['task_id'])
         graph_call = next((c for c in reg.get('graph_calls', []) if c['id'] == record.get('call_id')), None)
         if graph_call:
             from .graph_dispatch import execution_allowed
             outer_permitted = permitted
-            permitted = lambda: execution_allowed(self, attempt, graph_call['authorization']) and (outer_permitted is None or outer_permitted())
+            permitted = lambda: execution_allowed(self, attempt, graph_call['authorization'], reconciled_control) and (outer_permitted is None or outer_permitted())
         cfg = record['requested']
         record.setdefault('launch_title', title)
         record.setdefault('retry_of', retry_of)
@@ -527,6 +528,26 @@ class Launcher:
         # Projection names the CLI as provider.id; it is NOT Codex's model_provider.
         effective = ((data.get('worker') or {}).get('startOptions') or {}).get('launch', {}).get('effective') or {}
         record['runtime_state'] = data.get('worker', {}).get('state')
+        record['activity'] = data.get('projection', {}).get('stage', {}).get('activity')
+        projection = data.get('projection') or {}
+        live = projection.get('liveness') or {}
+        live = live if isinstance(live, dict) else {}
+        at = live.get('observedAt')
+        dispatch = data.get('dispatch') or {}
+        if (record['activity'] == 'working' and live.get('verdict') == 'live'
+                and live.get('source') == 'agent_status' and type(at) is int and at > 0
+                and projection.get('evidence', {}).get('liveStatus') == 'fresh'
+                and data.get('observation', {}).get('exactWorker') is True
+                and dispatch.get('id') == record['dispatch_id']
+                and dispatch.get('runId') == record.get('run_id')
+                and dispatch.get('taskId') == record.get('task_id')):
+            try:
+                self.verify_terminal(record, data)
+            except RuntimeError:
+                pass
+            else:
+                record['working_evidence'] = {'dispatch': record['dispatch_id'], 'at': at / 1000,
+                                              'source': 'exact fresh agent_status'}
         record['observed'] = {'agent': provider.get('id'), 'model': provider.get('model'),
                               'provider': None, 'effort': effective.get('effort'), 'source': 'Orca worker-show'}
         return data
@@ -888,7 +909,7 @@ class Launcher:
                     if not a.get('dispatch_id'):
                         if not dispatch:
                             self.check_operations(attempt)
-                            if a.get('replacement_of') and not terminal and not a.get('terminal'):
+                            if (a.get('replacement_of') or a.get('network_replacement_of')) and not terminal and not a.get('terminal'):
                                 a.update(status='ready')
                                 continue
                             proof = self.closed_pre_dispatch(a, terminal)
@@ -925,6 +946,16 @@ class Launcher:
                             a['status'] = 'stopped' if reg.get('stop_requested') else 'released'
                             continue
                     self.verify_terminal(a, data)
+                    abandon = ops.get(a['id'] + '-worker-abandon', {})
+                    if (data.get('terminalResource', {}).get('ownershipState') == 'external'
+                            and abandon.get('status') == 'completed'
+                            and abandon.get('args') == ['orchestration', 'worker-abandon', '--dispatch', a['dispatch_id']]):
+                        # Assignment fencing never proves process exit. Preserve the
+                        # exact terminal for the interrupted cleanup continuation.
+                        a.update(status='cleanup_pending')
+                        a.pop('error', None)
+                        a.pop('cleanup_error', None)
+                        continue
                     # Technical recovery may settle an exact owned process death even
                     # when no worker_done could be delivered. Acceptance remains separate.
                     observation = data.get('observation') or {}

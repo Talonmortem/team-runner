@@ -21,7 +21,22 @@ def capture(runner, state, now=None):
         known = {(e['run_id'], e['message_id']) for e in journal['events']}
         registry = runner.launcher.registry(current['attempt_dir'])
         graph = read_json(Path(current['attempt_dir']) / 'config.json', {}).get('version') == 3
+        from .event_scope import classify
+        for event in journal['events']:
+            message = next((m for m in current.get('messages', [])
+                            if (m.get('run_id'), m.get('id')) == (event['run_id'], event['message_id'])), {})
+            classification = classify(message, current, registry)
+            event['classification'] = classification
+            event['active'] = classification['kind'] == 'active' or (
+                message.get('type') == 'worker_done' and classification['kind'] == 'historical'
+                and 'superseded' not in classification['reason'])
         for message in current.get('messages', []):
+            classification = classify(message, current, registry)
+            if classification['kind'] not in ('active', 'historical'):
+                continue
+            if classification['kind'] == 'historical' and (message.get('type') != 'worker_done'
+                    or classification['reason'] == 'registered session superseded'):
+                continue
             if graph:
                 import json
                 payload = message.get('payload') or {}
@@ -37,7 +52,8 @@ def capture(runner, state, now=None):
                 continue
             journal['events'].append({'id': str(uuid.uuid4()), 'run_id': key[0], 'message_id': key[1],
                                       'type': message['type'], 'created_at': time.time() if now is None else now,
-                                      'dispatch': current['dispatch_id'], 'processed_at': None})
+                                      'dispatch': current['dispatch_id'], 'processed_at': None,
+                                      'classification': classification, 'active': True})
             known.add(key)
         atomic_json(path, journal)
 
@@ -69,7 +85,7 @@ def view(attempt, now=None):
         return {'events': [], 'notifications': [], 'overdue': 0}
     journal = read_json(paths(attempt)[0], {'events': [], 'notifications': []})
     now = time.time() if now is None else now
-    journal['overdue'] = sum(e['processed_at'] is None and now - e['created_at'] >= 300
+    journal['overdue'] = sum(e.get('active', True) and e['processed_at'] is None and now - e['created_at'] >= 300
                              for e in journal['events'])
     return journal
 
@@ -103,7 +119,7 @@ def tick(runner, state, now=None):
     path, guard = paths(attempt)
     with lock(guard):
         journal = read_json(path, {'events': [], 'notifications': []})
-        pending = [e for e in journal['events'] if e['processed_at'] is None
+        pending = [e for e in journal['events'] if e.get('active', True) and e['processed_at'] is None
                    and e['dispatch'] == current.get('dispatch_id')]
         if not pending:
             return

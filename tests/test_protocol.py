@@ -54,6 +54,7 @@ class Protocol(unittest.TestCase):
         result = protocol.summary(self.a)
         result['identity'] = '<workspace identity>'
         result['revision'] = '<opaque revision>'
+        result['autonomy']['scope']['identity'] = '<workspace identity>'
         fixture = Path(__file__).with_name('fixtures') / 'protocol-v1' / 'idle-summary.json'
         self.assertEqual(result, json.loads(fixture.read_text()))
 
@@ -113,13 +114,15 @@ class Protocol(unittest.TestCase):
         goal = application.goals(self.a)[0]
         goal_intent.authorize(self.a, {'goal': goal}, str(uuid.uuid4()))
         attempt = fixtures.Platform.attempt(self, self.a)
-        state = {'goal': goal, 'current': {'item': 'one', 'attempt': 3, 'attempt_dir': str(attempt)}}
+        state = {'goal': goal, 'current': {'item': 'one', 'attempt': 3, 'attempt_dir': str(attempt), 'dispatch_id': 'coord'}}
+        atomic_json(attempt / 'agents.json', {'agents': [{'id':'coordinator','role':'coordinator','status':'active',
+                    'dispatch_id':'coord','run_id':'parent'}], 'runs': []})
         self.a.save_state(state)
         self.assertIn({'action': 'retry'}, protocol.summary(self.a)['available_actions'])
         for change in ({'control_uncertain': 'lost'}, {'recovery_issues': ['unknown resource']}):
             self.a.save_state(dict(state, **change))
             self.assertNotIn({'action': 'retry'}, protocol.summary(self.a)['available_actions'])
-        for change in ({'gate_id': 'g'}, {'messages': [{'type': 'question'}]}):
+        for change in ({'gate_id': 'g'}, {'messages': [{'type': 'question','run_id':'parent','payload':{'dispatchId':'coord'}}]}):
             self.a.save_state(dict(state, current=dict(state['current'], **change)))
             self.assertNotIn({'action': 'retry'}, protocol.summary(self.a)['available_actions'])
         self.a.save_state(state)

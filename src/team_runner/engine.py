@@ -1,4 +1,4 @@
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import argparse
 
 import datetime as dt
@@ -80,7 +80,17 @@ class Runner:
 
     def save_state(self, st):
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        cur = st.get('current') or {}
+        if cur.get('attempt_dir') and cur.get('messages'):
+            from .event_scope import classify
+            registry = self.launcher.registry(cur['attempt_dir'])
+            for message in cur['messages']:
+                classification = classify(message, cur, registry)
+                if classification.get('waiting_calls'):
+                    message['classification'] = classification
         atomic_json(self.state_file, st)
+        from .state_time import observe
+        observe(self, st)
 
 
     def dirty_paths(self):
@@ -129,14 +139,20 @@ Reuse requires prior --keep-session plus explicit --function ID --reuse DISPATCH
 same attempt/role/function/settings/connection. Reviewer always fresh. Never guess context usage.
 Store specs/reports under $TEAM_RUNNER_ATTEMPT. Do not launch other goals or alter branches.
 Update Tasks.json and evidence following snapshot acceptance. Commit only if workflow permits it.
+If the snapshot enables workflow.commit_after_review, follow the per-item commit gate in GOAL_MASTER.md.
 If accepting this item completes the feature's entire queue, settle feature acceptance BEFORE worker_done.
 A completed queue alone is not feature acceptance. Check all feature criteria and required independent evidence;
 within delegated authority, record feature acceptance and update both feature and goal tracking consistently.
-If an external owner must approve, ask that owner in this attempt before reporting succeeded; never invent approval.
+Ask an external owner only when project instructions or an existing user decision explicitly require
+that owner's approval at this exact scope. Track/feature/goal approval is not an item approval gate.
+Do not create an extra ROOT approval gate in a generated card. Preserve explicit project approval gates;
+when one applies, cite its source and obtain the real decision in this attempt before reporting succeeded.
 Preserve item scope while other feature items remain. Do not rerun unchanged expensive checks merely to close tracking.
 Runner acceptance requires queue status exactly completed and evidence at {evidence}.
 After worker_done, keep this session available: runner may dispatch acceptance corrections here.
-Questions and worker_done use the exact injected preamble. Send succeeded only after acceptance.
+Questions and worker_done use the exact injected preamble. After coordinator acceptance and all required
+external approvals, send worker_done succeeded with completed tracking and evidence. Runner then performs
+formal acceptance via finish_item; do not wait for a Runner acceptance receipt before worker_done.
 Optional handoff: {args.handoff or 'none'}.
 """
 
@@ -158,7 +174,7 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         found = tr.find(item_id)
         if found is None:
             return [f"{item_id} не найден в трекинге"]
-        feat, _, t = found
+        feat, tracking_path, t = found
         if t["status"] != "completed":
             problems.append(f"Tasks.json: статус {item_id} = {t['status']}, ожидался completed")
         current = self.load_state().get('current') or {}
@@ -177,6 +193,28 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         if not (self.repo / acc).is_file() or (profile["acceptance"]["require_commit"] and not self.git("ls-files", str(acc)).strip()):
             problems.append(f"нет закоммиченного {acc}" if profile['acceptance']['require_commit'] else f"нет файла {acc}")
         head = self.git("rev-parse", "HEAD").strip()
+        if profile['workflow'].get('commit_after_review'):
+            attempt = current.get('attempt_dir')
+            reports = self.accepted_child_reports(attempt) if attempt else {}
+            reviews = [agent for agent in self.launcher.registry(attempt)['agents']
+                       if agent['role'] in ('final_reviewer', 'final_reviewer_critical')
+                       and not agent.get('superseded_by')] if attempt else []
+            if not reviews or reports.get(reviews[-1].get('dispatch_id'), {}).get('outcome') != 'succeeded':
+                problems.append('item commit requires a successful independent final review in this attempt')
+            key = tr.key(feat, t)
+            if (head == start_head or self.git('show', '-s', '--format=%P', head).strip() != start_head
+                    or self.git('show', '-s', '--format=%(trailers:key=Team-Runner-Item,valueonly)', head).strip().splitlines() != [key]):
+                problems.append(f'expected one item commit on {start_head} with trailer Team-Runner-Item: {key}')
+            else:
+                if (not self.git('--literal-pathspecs', 'ls-tree', '--name-only', head, '--', str(acc)).strip()
+                        or self.git('--literal-pathspecs', 'diff', '--name-only', head, '--', str(acc)).strip()):
+                    problems.append(f'item acceptance evidence must match the item commit: {acc}')
+                try:
+                    committed = json.loads(self.git('show', f'{head}:{tracking_path.relative_to(self.repo)}'))
+                    if not any(row['id'] == t['id'] and row['status'] == 'completed' for row in committed['queue']):
+                        raise ValueError('item is not completed')
+                except (subprocess.CalledProcessError, KeyError, TypeError, ValueError):
+                    problems.append(f'item completion must be recorded in the item commit: {tracking_path}')
         if profile["acceptance"]["require_commit"] and head == start_head:
             problems.append("нет новых коммитов с начала пункта")
         new_dirty = [p for p in self.dirty_paths() if p not in dirty_before]
@@ -454,6 +492,8 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         last_liveness_check = 0.0
         while True:
             self.process_controls(st)
+            from .autonomy import tick as autonomy_tick
+            autonomy_tick(self, st)
             if st.get("stop_requested") or st.get('control_uncertain'):
                 return None
             try:
@@ -485,12 +525,21 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                     last_liveness_check = time.monotonic()
                     lv = self.launcher.liveness(cur["dispatch_id"], st.get("mailbox"))
                     self.log(f"{cur['item']}: ожидание, координатор {lv}")
-                    if lv == "exited":
+                    registry = self.launcher.registry(cur['attempt_dir']) if cur.get('attempt_dir') else {}
+                    waiting = any(a.get('dispatch_id') == cur['dispatch_id'] and a.get('status') == 'waiting_child'
+                                  for a in registry.get('agents', []))
+                    if lv == "exited" and not waiting:
                         self.notify("координатор завершился без worker_done", f"{cur['item']}: team-runner retry")
                         return None
                 continue
             done = None
+            from .event_scope import classify
+            registry = self.launcher.registry(cur['attempt_dir']) if cur.get('attempt_dir') else {}
             for m in msgs:
+                classification = classify(dict(m, run_id=st['run_id']), cur, registry)
+                if cur.get('attempt_dir') and classification['kind'] != 'active':
+                    self.log('event ' + classification['kind'] + ': ' + classification['reason'])
+                    continue
                 body = (m.get("body") or "").strip()
                 if m["type"] == "question":
                     cur.setdefault("questions", []).append(m["id"])
@@ -767,6 +816,8 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         elif args.cmd == "retry":
             data = {"force": args.force, "refresh": args.refresh,
                     "allow_extra_attempt": getattr(args, "allow_extra_attempt", False)}
+            if getattr(args, 'refresh_context', False):
+                data['refresh_context'] = True
         from .application import submit_command
         rec = submit_command(self, args.cmd, data, getattr(args, 'request_id', None) or str(uuid.uuid4()))
         print(json.dumps(rec, ensure_ascii=False))
@@ -774,6 +825,8 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
 
 
     def submit_control(self, action, data=None, request_id=None):
+        if action == 'autonomy':
+            raise ValueError('autonomy requires a versioned command with scope/revision')
         if request_id is not None:
             try:
                 uuid.UUID(request_id)
@@ -955,6 +1008,8 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         if cur.get('attempt_dir') != str(attempt):
             return {}
         reports = {}
+        registered = {(a.get('run_id'), a.get('dispatch_id')) for a in self.launcher.registry(attempt)['agents']
+                      if not a.get('superseded_by')}
         for message in cur.get('messages', []):
             if message.get('type') == 'worker_done':
                 payload = message.get('payload') or {}
@@ -963,7 +1018,7 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                         payload = json.loads(payload)
                     except ValueError:
                         continue
-                if isinstance(payload, dict):
+                if isinstance(payload, dict) and (message.get('run_id'), payload.get('dispatchId')) in registered:
                     reports[payload.get('dispatchId')] = payload
         return reports
 
@@ -1028,6 +1083,13 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 except ValueError:
                     return None
             return payload.get('dispatchId') if isinstance(payload, dict) else None
+        from .event_scope import classify
+        for message in cur.get('messages', []):
+            if message.get('type') in ('question', 'escalation'):
+                classification = classify(message, cur, registry)
+                message['classification'] = classification
+                if classification['kind'] == 'historical':
+                    message.update(closed=True, closed_reason=classification['reason'])
         owned = {(a.get('run_id'), a.get('dispatch_id')) for a in registry['agents']
                  if a.get('run_id') and a.get('dispatch_id')}
         completed = {(m.get('run_id'), dispatch_id(m)) for m in persisted.get('messages', [])
@@ -1173,7 +1235,21 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             self.context.check_attempt(cur['attempt_dir'])
         if '_target' in data and data['_target'] != (cur.get('attempt_dir') or cur.get('dispatch_id') or cur.get('item')):
             raise ValueError('command belongs to a previous attempt')
-        if action == 'technical-reconcile':
+        if action == 'network-reconcile':
+            from .network_recovery import reconcile
+            reconcile(self, st, data)
+        elif action == 'resource-resume':
+            from . import resource_wait
+            with resource_wait.permission(self, data):
+                key, args = resource_wait.effect(data)
+                self.effect(st, key, *args, mailbox=next((r.get('mailbox') for r in
+                    self.launcher.registry(cur['attempt_dir'])['runs'] if r.get('run_id') == data['run_id']), None))
+                resource_wait.check_receipt(read_json(self.state_dir / 'operations.json')[key], data)
+                resource_wait.finish(st, data, command_id)
+        elif action == 'network-recover':
+            from .network_recovery import apply
+            apply(self, st, data, command_id)
+        elif action == 'technical-reconcile':
             from .recovery import settings, target
             expected = data.get('_target')
             permitted = lambda: (settings(self)['enabled'] and settings(self)['intent'] == 'running'
@@ -1183,10 +1259,10 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             self.recover(st, technical_only=True)
             self.cleanup_accepted_reports(st, permitted=permitted)
             cur = st.get('current') or {}
+            from .event_scope import pending
             decision = (cur.get('failed') or cur.get('problems') or 'acceptance_rework' in cur
                         or (cur.get('gate_id') and not cur.get('gate_resolved'))
-                        or any(m.get('type') in ('question', 'escalation') and not m.get('closed')
-                               and not m.get('answered') for m in cur.get('messages', [])))
+                        or pending(cur, self.launcher.registry(cur['attempt_dir'])))
             if decision:
                 raise ValueError('acceptance or user decision required; technical cleanup completed')
             if (permitted() and cur.get('attempt_dir') and not st.get('recovery_issues')
@@ -1204,7 +1280,25 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 raise RuntimeError('; '.join(st['recovery_issues']))
         elif action == 'pause':
             st['paused'] = True
+        elif action == 'resolve-escalation':
+            from .event_scope import classify
+            matches = [m for m in cur.get('messages', [])
+                       if m.get('id') == data['message_id']
+                       and (not data.get('run_id') or m.get('run_id') == data['run_id'])]
+            if len(matches) != 1 or matches[0].get('type') != 'escalation':
+                raise ValueError('no unique escalation in current attempt')
+            message = matches[0]
+            if message.get('closed') or message.get('answered'):
+                raise ValueError('escalation already resolved')
+            if not cur.get('attempt_dir') or classify(
+                    message, cur, self.launcher.registry(cur['attempt_dir']))['kind'] != 'active':
+                raise ValueError('escalation is not owned by an active registered Dispatch')
+            message.update(closed=True, closed_reason='explicit resolution',
+                           resolution={'request_id': command_id, 'text': data['text'],
+                                       'at': dt.datetime.now(dt.timezone.utc).isoformat()})
         elif action == 'reply':
+            from . import resource_wait
+            resource = '_resource_wait' in data
             message_id = data.get('message_id')
             text = data.get('text')
             if not isinstance(text, str) or not text.strip() or len(text) > 32000:
@@ -1217,6 +1311,9 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             if not message and message_id not in cur.get('questions', []):
                 raise ValueError('unknown question')
             if message and message.get('answered'):
+                if resource and resource_wait.ready(self, st, data):
+                    resource_wait.finish(st, data, command_id)
+                    self.save_state(st)
                 return
             if message and message.get('closed'):
                 raise ValueError(message.get('reply_error') or 'question is closed')
@@ -1225,14 +1322,17 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             if cur.get('attempt_dir'):
                 mailbox = next((r.get('mailbox') for r in self.launcher.registry(cur['attempt_dir'])['runs']
                                 if r.get('run_id') == run_id), None)
-            try:
-                self.effect(st, 'reply:' + run_id + ':' + message_id, 'orchestration', 'reply', '--id', message_id, '--body', text, '--run', run_id, mailbox=mailbox)
-            except operations.RejectedOperation as exc:
+            with resource_wait.permission(self, data) if resource else nullcontext():
+                try:
+                    self.effect(st, 'reply:' + run_id + ':' + message_id, 'orchestration', 'reply', '--id', message_id, '--body', text, '--run', run_id, mailbox=mailbox)
+                except operations.RejectedOperation as exc:
+                    if message:
+                        message.update(closed=True, reply_error=str(exc))
+                    raise
                 if message:
-                    message.update(closed=True, reply_error=str(exc))
-                raise
-            if message:
-                message['answered'] = True
+                    message['answered'] = True
+                if resource:
+                    resource_wait.finish(st, data, command_id)
         elif action == 'resolve':
             if data.get('choice') not in ('start', 'skip', 'stop') or not cur.get('gate_id'):
                 raise ValueError('no pending gate or invalid resolution')
@@ -1309,7 +1409,7 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             st['current'] = {k: cur[k] for k in ('item', 'start_head', 'dirty_before') if k in cur}
             st['current'].update(attempt=cur.get('attempt', 1) + 1, previous_dispatch=cur.get('dispatch_id'),
                                  gate_resolved=True, retry_config=snapshot,
-                                 retry_context_from=None if data.get('refresh') else cur['attempt_dir'],
+                                 retry_context_from=None if data.get('refresh') or data.get('refresh_context') else cur['attempt_dir'],
                                  started_at=dt.datetime.now().isoformat(timespec='seconds'))
             if extra:
                 st['current']['manual_retry'] = {'previous_attempt': cur.get('attempt', 1),
@@ -1344,11 +1444,12 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             startup_issues = operations.reconcile(self.launcher.journal(self.state_dir / 'startup'), self.orca)
             issues += startup_issues
             if not startup_issues:
+                startup = read_json(self.state_dir / 'startup.json', {})
                 if running(self.state_dir) and st.get('runner_status') == 'running':
-                    atomic_json(self.state_dir / 'startup.json', {'status': 'running'})
+                    atomic_json(self.state_dir / 'startup.json', dict(startup, status='running'))
                 elif not running(self.state_dir):
                     # All creation receipts proved, no process owns runner.lock.
-                    atomic_json(self.state_dir / 'startup.json', {'status': 'idle'})
+                    atomic_json(self.state_dir / 'startup.json', dict(startup, status='idle'))
         if cur.get('attempt_dir'):
             recovery_args = {'accepted_reports': self.accepted_child_reports(cur['attempt_dir'])}
             issues += self.launcher.reconcile_attempt(cur['attempt_dir'], request_id if request_id and path != paths[0] else None, **recovery_args)
@@ -1396,6 +1497,20 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                             and all(envelope.get('scope', {}).get(key) == command['guard'].get(key)
                                     for key in ('generation', 'attempt'))):
                         st.setdefault('applied_commands', []).append(uncertain)
+                    if (command.get('action') == envelope.get('action') == 'autonomy'
+                            and envelope.get('request_id') == uncertain == command.get('id')
+                            and envelope.get('scope', {}).get('identity') == self.context.identity()):
+                        from .autonomy import document
+                        proof = next((h for h in document(self)['history'] if h['request_id'] == uncertain), {})
+                        if (proof.get('scope') == {'identity': self.context.identity(),
+                                                   'generation': command.get('guard', {}).get('generation')}
+                                and proof.get('enabled') is envelope.get('payload', {}).get('enabled')
+                                and proof.get('unlimited_passes', False) is envelope.get('payload', {}).get('unlimited_passes', False)
+                                and type(proof.get('enabled')) is bool):
+                            if not proof['enabled']:
+                                from .network_recovery import cancel
+                                cancel(self, 'autonomy disabled')
+                            st.setdefault('applied_commands', []).append(uncertain)
                     # Complete only an exact, still-current stop intention. Existing
                     # journal keys prohibit replay of an unconfirmed external effect.
                     if (command.get('action') == envelope.get('action') == 'stop'
@@ -1433,6 +1548,17 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             command = read_json(command_path)
             if uncertain in st.get('applied_commands', []):
                 command.update(status='done')
+            elif command and command['action'] in ('network-recover', 'network-reconcile'):
+                from .network_recovery import reconcile
+                data = command['data']
+                original = uncertain if command['action'] == 'network-recover' else data['request']
+                try:
+                    reconcile(self, st, {'_target': cur.get('attempt_dir'), 'request': original,
+                                         'session': data['session']}, observe_only=True)
+                    command = read_json(command_path)
+                    command.update(status='done')
+                except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+                    issues.append('network reconciliation: ' + str(exc))
             elif command and command['action'] in ('reconcile', 'continue-operation', 'technical-reconcile'):
                 command.update(status='done')
             elif command and command['action'] == 'pause':
@@ -1443,9 +1569,13 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 # The stop intention is durable. Reconciliation never issues a new stop/close.
                 st.setdefault('applied_commands', []).append(uncertain)
                 command.update(status='done')
-            elif command and command['action'] in ('reply', 'resolve'):
+            elif command and command['action'] in ('reply', 'resolve', 'resource-resume'):
                 data = command['data']
-                key = ('reply:' + next(m['run_id'] for m in cur['messages'] if m['id'] == data['message_id']) + ':' + data['message_id'] if command['action'] == 'reply' else 'resolve:' + cur['gate_id'])
+                if command['action'] == 'resource-resume':
+                    from .resource_wait import effect
+                    key = effect(data)[0]
+                else:
+                    key = ('reply:' + next(m['run_id'] for m in cur['messages'] if m['id'] == data['message_id']) + ':' + data['message_id'] if command['action'] == 'reply' else 'resolve:' + cur['gate_id'])
                 recorded = read_json(paths[0], {}).get(key, {})
                 if recorded.get('status') == 'completed':
                     self.apply_control(st, command['action'], data, uncertain)  # cached receipt only
@@ -1518,21 +1648,39 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 continue
             if rec['status'] != 'pending':
                 continue
-            if st.get('control_uncertain') and rec['action'] not in ('reconcile', 'continue-operation', 'technical-reconcile'):
+            if st.get('control_uncertain') and rec['action'] not in ('reconcile', 'continue-operation', 'technical-reconcile', 'network-reconcile'):
                 continue
+            from . import resource_wait
+            if rec['action'] in ('reply', 'resource-resume') and '_resource_wait' in rec['data']:
+                try:
+                    if not resource_wait.ready(self, st, rec['data']):
+                        if resource_wait.mark(st, rec['data'], rec['id']):
+                            self.save_state(st)
+                        continue
+                except (ValueError, RuntimeError, OSError) as exc:
+                    if resource_wait.mark(st, rec['data'], rec['id'], cancelled=True):
+                        self.save_state(st)
+                    rec.update(status='error', error=str(exc))
+                    atomic_json(path, rec)
+                    continue
             rec['status'] = 'applying'
             atomic_json(path, rec)
             try:
                 self.apply_control(st, rec['action'], rec['data'], rec['id'])
                 rec['status'] = 'done'
+            except resource_wait.ResourceBusy:
+                rec['status'] = 'pending'
             except operations.UncertainOperation as exc:
                 st.setdefault('control_uncertain', rec['id'])
                 rec.update(status='unknown', error=str(exc))
                 self.save_state(st)
             except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
                 rec.update(status='error', error=str(exc))
+                if '_resource_wait' in rec['data']:
+                    resource_wait.mark(st, rec['data'], rec['id'], cancelled=True)
                 self.save_state(st)
-            rec['result'] = {'state': 'ok' if rec['status'] == 'done' else 'error',
+            rec['result'] = {'state': ('ok' if rec['status'] == 'done' else
+                                       'waiting_resource' if rec['status'] == 'pending' else 'error'),
                              'error': rec.get('error') if rec['status'] != 'done' else None}
             atomic_json(path, rec)
 

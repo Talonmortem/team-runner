@@ -175,7 +175,9 @@ def start_runner(runner, data, *, recovery=False, expected_authorization=None, e
 def run_process(runner, nonce):
     from types import SimpleNamespace
     ctx = runner.context
-    with lock(ctx.checkout_lock), lock(runner.state_dir / 'runner.lock', blocking=False):
+    # The checkout lock excludes another executor. A supervisor may briefly own
+    # runner.lock while inspecting a departed owner; wait for that inspection.
+    with lock(ctx.checkout_lock), lock(runner.state_dir / 'runner.lock'):
         request = read_json(runner.state_dir / 'launch.json', {})
         if request.get('nonce') != nonce or request.get('identity') != ctx.identity():
             raise ValueError('runner launch identity/nonce mismatch')

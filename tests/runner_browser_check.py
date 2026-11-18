@@ -86,6 +86,9 @@ class BrowserCheck:
             self.click_visible(summary)
 
     def visible(self, selector):
+        count = self.evaluate(f'document.querySelectorAll({json.dumps(selector)}).length')
+        if count > 1:
+            raise AssertionError('ambiguous selector: ' + selector)
         self.dom(f'''(() => {{ const element = document.querySelector({json.dumps(selector)});
           if (!element || element.matches(':disabled')) return false;
           const box = element.getBoundingClientRect(), style = getComputedStyle(element);

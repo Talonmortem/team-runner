@@ -33,5 +33,19 @@
     "next_check": null
   },
   "compatibility": "legacy",
-  "epoch": null
+  "epoch": null,
+  "autonomy": {
+    "schema_version": 1,
+    "scope": {
+      "identity": "<workspace identity>",
+      "generation": null
+    },
+    "revision": 0,
+    "enabled": false,
+    "unlimited_passes": false,
+    "extra_passes": 3,
+    "network_resumes": 2,
+    "network_replacements": 1,
+    "budgets": {}
+  }
 }

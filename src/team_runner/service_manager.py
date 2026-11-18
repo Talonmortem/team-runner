@@ -286,6 +286,11 @@ class Manager:
                 atomic_json(self.directory / 'instance.json', record)
             try:
                 while read_json(self.directory / 'stop.json', {}).get('nonce') != nonce:
+                    from .observer_service import lifecycle_tick
+                    try:
+                        lifecycle_tick(self.catalog)
+                    except (OSError, ValueError, RuntimeError):
+                        pass  # Observer retains its own durable blocker/unknown operation.
                     projects = list(self.catalog.read()['projects'])
                     if projects:
                         offset %= len(projects)

@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 import os
 import ctypes
+import fcntl
 from pathlib import Path
 import socket
 import time
@@ -32,10 +33,12 @@ def clear_residue(value):
 
 
 @contextmanager
-def acquire(path=None):
+def acquire(path=None, on_wait=None):
     path = Path(path) if path else default_path()
     started = time.monotonic()
-    with subreaper(), lock(path) as fd:
+    def waiting():
+        on_wait({'kind': 'host_heavy', 'path': str(path), 'waiting_at': time.time()})
+    with subreaper(), lock(path, on_wait=waiting if on_wait else None) as fd:
         metadata = Path(str(path) + '.json')
         previous = read_json(metadata, {})
         if previous and previous.get('status') != 'clean' and not clear_residue(previous):
@@ -59,6 +62,29 @@ def acquire(path=None):
             else:
                 receipt['status'] = 'cleanup_required'
             atomic_json(metadata, receipt)
+
+
+def available(path=None):
+    """Read-only availability proof; never clear residue or hold another lease."""
+    path = Path(path) if path else default_path()
+    metadata = Path(str(path) + '.json')
+    try:
+        stream = path.open('r')
+    except FileNotFoundError:
+        return not metadata.exists()
+    with stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        try:
+            previous = read_json(metadata, {})
+            return (isinstance(previous, dict) and (not previous
+                    or previous.get('status') == 'clean' or clear_residue(previous)))
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return False
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
 
 
 def process_group(pgid):

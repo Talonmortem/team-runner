@@ -34,14 +34,17 @@ def atomic_json(path, value):
 
 
 @contextmanager
-def lock(path, blocking=True):
+def lock(path, blocking=True, on_wait=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('a') as f:
         try:
-            fcntl.flock(f, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+            fcntl.flock(f, fcntl.LOCK_EX | (fcntl.LOCK_NB if on_wait or not blocking else 0))
         except BlockingIOError:
-            raise RuntimeError(f'already running: {path.name}') from None
+            if not blocking:
+                raise RuntimeError(f'already running: {path.name}') from None
+            on_wait()
+            fcntl.flock(f, fcntl.LOCK_EX)
         try:
             yield f.fileno()
         finally:

@@ -12,16 +12,16 @@
 | Роль | Runtime | Модель | Effort | Сессия |
 |---|---|---|---|---|
 | `coordinator` / supervisor | Claude | `claude-opus-5-5` | high | координатор |
-| `planner` | Codex | `gpt-6.1-sol` | high | отдельная |
+| `planner` | Codex | `gpt-6.2-sol` | high | отдельная |
 | `explorer` | Codex | `gpt-6-luna` | xhigh | отдельная |
 | `implementer_standard` | Codex | `gpt-6-luna` | xhigh | одна на функцию |
 | `implementer_medium` | Codex | `gpt-6.1-terra` | xhigh | одна на функцию |
-| `implementer_complex` | Codex | `gpt-6.1-sol` | high | одна на функцию |
+| `implementer_complex` | Codex | `gpt-6.2-sol` | high | одна на функцию |
 | `tester` (T1 всех, T2 standard) | Codex | `gpt-6-luna` | xhigh | отдельно от implementer |
-| `tester_complex` (T2 complex) | Codex | `gpt-6.1-sol` | high | отдельно от T1 |
-| `final_reviewer` | Codex | `gpt-6.1-sol` | high | всегда свежая |
+| `tester_complex` (T2 complex) | Codex | `gpt-6.2-sol` | high | отдельно от T1 |
+| `final_reviewer` | Codex | `gpt-6.2-sol` | high | всегда свежая |
 | `final_reviewer_critical` | Claude | `claude-opus-5-5` | high | всегда свежая |
-| `escalation` | Codex | `gpt-6.1-sol` | high | свежий консультант |
+| `escalation` | Codex | `gpt-6.2-sol` | high | свежий консультант |
 | `escalation_expert` | Claude | `claude-opus-5-5` | high | свежий консультант |
 | `completion_checker` | Codex | `gpt-6-luna` | xhigh | формальная сверка |
 

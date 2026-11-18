@@ -48,11 +48,13 @@ team-runner workspace disable --project PROJECT_UUID --workspace WORKSPACE_UUID
 
 Instructions/requirements — локальные относительные или абсолютные пути. Их текст и SHA256, профиль, точная identity checkout/Orca и копия общих материалов фиксируются в `attempts/UUID/context.json` и `materials/`. Настройки ролей — `config.json`. Изменения применяются к следующим попыткам. `checks` — команды, обязательные для координатора/тестера; HTTP сам произвольные команды не выполняет.
 
+`workflow.commit_after_review: true` требует `allow_commits: true`. Координатор создаёт один локальный коммит пункта после независимого финального ревью. Runner проверяет результат ревью текущей попытки, родителя и trailer коммита, а также включение трекинга и evidence. Приёмку всей цели по-прежнему задаёт `acceptance`. После подтверждённой остановки `retry --refresh-context` обновляет профиль, инструкции и материалы, сохраняя снимок ролей.
+
 Приоритет ролей: package defaults → project → workspace → сохранённые настройки каталога/`--config` → явные CLI overrides координатора → snapshot. Role override-файл — объект `{"tester":{"model":"..."}}`. Полный `--config` — `{"version":2,"template":"current","roles":{...},"reserves":{...}}`; v1 читается, старое обновление сохраняет резервы. Secrets и содержимое provider credentials не копируются.
 
 Встроенные редактируемые шаблоны: `current` («Текущие агенты»), `cloudru` («Cloud.ru») и `openai-only` («OpenAI-only»).
 
-`openai-only`: все роли — Codex через `codex-lb`; координатор — `gpt-6.1-sol / medium`, критический ревьюер и эксперт эскалации — `gpt-6.1-sol / high`. Остальные роли и пустые резервы — как в `current`.
+`openai-only`: все роли — Codex через `codex-lb`; координатор — `gpt-6.2-sol / medium`, критический ревьюер и эксперт эскалации — `gpt-6.2-astra / high`. Остальные роли и пустые резервы — как в `current`.
 В UI выбор заполняет черновик; сохранение влияет только на следующие попытки.
 Fast — необязательный boolean `fast` в основной роли и резерве: true/false либо отсутствие поля
 для наследования runtime. `execute --fast` / `--no-fast` и совместимый `run` задают override

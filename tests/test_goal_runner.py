@@ -78,7 +78,7 @@ class Configuration(Fixture):
 
     def test_switch_to_codex_uses_sol_high(self):
         role = config.load_config(self.root, overrides={'agent': 'codex'})['roles']['coordinator']
-        self.assertEqual((role['model'], role['effort'], role['profile']), ('gpt-6.1-sol', 'high', ''))
+        self.assertEqual((role['model'], role['effort'], role['profile']), ('gpt-6.2-sol', 'high', ''))
 
     def test_profile_uses_its_provider_unless_explicitly_overridden(self):
         cfg = config.load_config(self.root, overrides={'agent':'codex','profile':'named'})
@@ -318,6 +318,15 @@ class Controls(Fixture):
         st['stop_status'] = 'stopped'
         runner.apply_control(st, 'retry', {'refresh': True})
         self.assertEqual(st['current']['retry_config']['roles']['tester']['model'], 'new-model')
+
+    def test_retry_refresh_context_keeps_frozen_roles(self):
+        attempt, st = self.attempt()
+        cfg = config.defaults(); cfg['roles']['tester']['model'] = 'new-model'
+        store.atomic_json(runner.context.settings_dir / 'config.json', cfg)
+        st['stop_status'] = 'stopped'
+        runner.apply_control(st, 'retry', {'refresh_context': True})
+        self.assertEqual(st['current']['retry_config'], store.read_json(attempt / 'config.json'))
+        self.assertIsNone(st['current']['retry_context_from'])
 
     def test_legacy_active_dispatch_is_not_launched_again(self):
         st = {'history': [], 'run_id': 'r', 'current': {'item':'X','dispatch_id':'old','task_id':'task'}}

@@ -16,6 +16,10 @@ from .team_graph import node
 TERMINAL = ('completed', 'stopped')
 
 
+class EdgeLimit(ValueError):
+    pass
+
+
 def snapshot(launcher, attempt):
     launcher.context.check_attempt(attempt)
     cfg = read_json(Path(attempt) / 'config.json', {})
@@ -24,11 +28,12 @@ def snapshot(launcher, attempt):
     return cfg
 
 
-def current(launcher, attempt):
+def current(launcher, attempt, reconciled_control=None):
     state = read_json(launcher.context.state_dir / 'state.json', {})
     if (state.get('current') or {}).get('attempt_dir') != str(attempt):
         raise ValueError('stale attempt')
-    if state.get('stop_requested') or state.get('control_uncertain'):
+    if (state.get('stop_requested') or state.get('control_uncertain')
+            and state['control_uncertain'] != reconciled_control):
         raise RuntimeError('attempt stopped or control unconfirmed')
     intent = read_json(launcher.context.state_dir / 'goal-intent.json', {})
     if intent.get('desired_state') == 'stopped':
@@ -36,9 +41,9 @@ def current(launcher, attempt):
     return state
 
 
-def execution_allowed(launcher, attempt, expected):
+def execution_allowed(launcher, attempt, expected, reconciled_control=None):
     try:
-        current(launcher, attempt)
+        current(launcher, attempt, reconciled_control)
         intent = read_json(launcher.context.state_dir / 'goal-intent.json', {})
         actual = {k: intent.get(k) for k in ('generation', 'epoch')}
         return actual == expected and (not intent or intent.get('desired_state') == 'running')
@@ -269,7 +274,7 @@ def return_edge(launcher, attempt, reg, agent, payload):
         raise ValueError('rework completion input changed; inspect existing intent')
     if not take_pass(reg, cfg, call):
         launcher.save_registry(attempt, reg)
-        raise ValueError('rework edge limit exhausted; user must grant one pass, then repeat this report')
+        raise EdgeLimit('rework edge limit exhausted; waiting for a specific grant')
     call.update(status='completed', result=copy.deepcopy(payload))
     launcher.save_registry(attempt, reg)
     return edge

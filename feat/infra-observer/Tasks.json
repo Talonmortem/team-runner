@@ -1,0 +1,152 @@
+{
+  "objective": "Инфраструктурный наблюдатель Team Runner; первая раскатка SHM auto",
+  "status": "in_progress",
+  "invariants": [
+    "Feature track only; not Runner launch root",
+    "Preserve baseline /tmp/team-runner-infra-observer-baseline-20261116T151124Z",
+    "No commits/branch changes/runtime dependencies",
+    "Explicit Context; isolated observer attempts/registry/mailbox/roles",
+    "No replay unknown effects; immutable snapshots before dispatch",
+    "No product logic or weakened checks; max two repairs and one active repair",
+    "No self-policy/budget changes; independent verification",
+    "No registered goals as tests; no artificial SHM failures"
+  ],
+  "queue": [
+    {
+      "id": "contracts",
+      "depends_on": [],
+      "status": "completed",
+      "acceptance": "Explicit project/service Context, isolated roles, immutable input/settings/task snapshots; no SHM attempt reuse.",
+      "verification": {
+        "status": "passed",
+        "checks": [
+          "Contract/isolation tests; validate task graph"
+        ],
+        "evidence": [
+          "Final31isolated observer tests PASS13.031s on frozen source, including8independent contracts; full733PASS and independent review clean; evidence/verification.json."
+        ]
+      }
+    },
+    {
+      "id": "service",
+      "depends_on": [
+        "contracts"
+      ],
+      "status": "completed",
+      "acceptance": "Separate singleton background observer; manager retains service lifecycle; persisted incremental cursors, explicit project allowlist and 10s poll.",
+      "verification": {
+        "status": "passed",
+        "checks": [
+          "Process identity/restart/cursor/deduplication tests"
+        ],
+        "evidence": [
+          "Final31isolated observer tests PASS13.031s on frozen source, including8independent contracts; full733PASS and independent review clean; evidence/verification.json."
+        ]
+      }
+    },
+    {
+      "id": "repair",
+      "depends_on": [
+        "service"
+      ],
+      "status": "completed",
+      "acceptance": "Diagnostic, approval, auto; bounded diagnose/implement/independent-verify/apply/result cycle; scope/approval/resource/precondition fences and unknown-effect reconciliation.",
+      "verification": {
+        "status": "passed",
+        "checks": [
+          "All modes, stale approval, two-attempt budget, concurrent repair, occupied resource, changed inputs, lost receipt, late report, pause/stop tests"
+        ],
+        "evidence": [
+          "Final31isolated observer tests PASS13.031s on frozen source, including8independent contracts; full733PASS and independent review clean; evidence/verification.json."
+        ]
+      }
+    },
+    {
+      "id": "verification",
+      "depends_on": [
+        "repair"
+      ],
+      "status": "completed",
+      "acceptance": "Isolated end-to-end repair and independent verification; no registered goals launched as tests.",
+      "verification": {
+        "status": "passed",
+        "checks": [
+          "PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_infra_observer*.py'",
+          "PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'",
+          "git diff --check"
+        ],
+        "evidence": [
+          "Full733tests PASS256.121s (overlapped minor observer changes); final31observer tests PASS13.031s on stable source; all3standalonehelpers PASS; evidence/verification.json"
+        ]
+      }
+    },
+    {
+      "id": "review",
+      "depends_on": [
+        "verification"
+      ],
+      "status": "completed",
+      "acceptance": "Separate agent read-only review of actual diff relative to preserved dirty baseline; substantial findings fixed and re-reviewed.",
+      "verification": {
+        "status": "passed",
+        "checks": [
+          "Independent source/contract review and affected regressions"
+        ],
+        "evidence": [
+          "Independent /root/review actual baseline diff review; all significant findings fixed and affected changes re-reviewed; final atomic commandreceipt delta clean."
+        ]
+      }
+    },
+    {
+      "id": "rollout",
+      "depends_on": [
+        "review"
+      ],
+      "status": "completed",
+      "acceptance": "SHM-only diagnostic confirmed then auto; process/event/agent identities, no duplicates; preserve SHM attempts and snapshots; concrete launch/status/pause/mode commands and supervision handoff.",
+      "verification": {
+        "status": "passed",
+        "checks": [
+          "Read-only before/after SHM identity/snapshot evidence; live observer launch authorized by approved plan; no artificial incidents"
+        ],
+        "evidence": [
+          "evidence/rollout-final.json:15preservation/process/cleanup checks PASS; SHM-only auto running PID1374461 nonce66e7b228-a2f8-4e1a-b8d5-d1047c1addf5; live diagnosis/report succeeded and signal suppressed; worker released/mailbox closed.",
+          "operations.md: installed CLI launch/reconnect/status/pause/mode commands with actual IDs/paths and ready supervision handoff.",
+          "Initial system-Python entry failure was proven pre-dispatch, exact owned terminals closed via journal and absence confirmed; controlled restart through installed environment; evidence/bootstrap-cleanup.json."
+        ]
+      }
+    },
+    {
+      "id": "supervision",
+      "depends_on": [
+        "rollout"
+      ],
+      "status": "in_progress",
+      "acceptance": "Confirmed real complete repair cycle and subsequent 30 minutes stable operation; isolated and real evidence separate.",
+      "verification": {
+        "status": "not_started",
+        "checks": [
+          "Actual incident/action/independent check/result receipts and 30-minute observations"
+        ],
+        "evidence": []
+      },
+      "remaining": "No real automatic repair observed. A successful isolated repair cycle and completed live diagnosis do not satisfy real repair plus30minutes stable supervision; await a natural infrastructure incident. Do not inject SHM faults."
+    }
+  ],
+  "verification": {
+    "status": "in_progress",
+    "checks": [
+      "Targeted isolated tests",
+      "Full unittest suite",
+      "Independent review",
+      "SHM rollout and real supervision evidence"
+    ],
+    "evidence": [
+      "Implementation gates PASS: full733tests; final31observer tests and3helpers on stable source; independent review clean.",
+      "SHM-only auto rollout and15final preservation/process/cleanup checks PASS: evidence/rollout-final.json.",
+      "Operational final criterion still pending: real independent repair/result cycle followed by30minutes stable supervision.",
+      "Hourly/context optimization: final37observer tests PASS, full741PASS (minor final deltas covered by targeted), independent review clean; singleton controlled restart and preservation checks PASS; evidence/optimization.json. Live token savings not yet measured."
+    ]
+  },
+  "latest_attempt": "2026-11-16 23:49 MSK: hourly semantic review and bounded incremental context deployed; final37targeted/741full PASS and independent review clean; SHM-only auto singleton restarted; original real-repair plus30-minute supervision criterion still pending."
+}

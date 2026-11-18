@@ -10,6 +10,7 @@ implementer ({PROFILE}) / run {RUN} / task {ITEM} шаг {STEP} / base SHA {BASE
 {CARD}
 
 ## Передача
+До передачи — применимые дешёвые format/lint, непустые целевые тесты, реальные fixture paths/inputs и selfcheck изменённого harness. Команды/exit codes/логи/входы приложи к отчёту. Native/heavy до обязательного source review не запускать; отложенные gates явно DEFERRED с владельцем. Исправление охватывает весь назначенный подтверждённый класс; второй возврат класса требует диагностики и изменённого плана координатора перед следующим fix.
 Гейты — $TEAM_RUNNER_MATERIALS/worker-brief.md §«Гейты передачи»; timings для раннера: {TIMINGS}. Отчёт RUN_STATE/reports/{ITEM}-impl-{SLUG}.md
 до 500 слов с выводами и ссылкой на полное отдельное приложение самопроверки по классам; frozen manifest RUN_STATE/manifests/{ITEM}-{SLUG}-frozen.json. Без коммита. Вопрос по
 бизнес-правилу — `orca orchestration ask`, не придумывать.

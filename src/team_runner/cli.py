@@ -26,7 +26,7 @@ def selection(args, catalog):
     attempt = os.environ.get('TEAM_RUNNER_ATTEMPT')
     if attempt:
         ctx.check_attempt(attempt)
-        if args.cmd not in ('launch', 'delegate', 'messages', 'reply', 'status', 'events', 'artifacts'):
+        if args.cmd not in ('launch', 'delegate', 'messages', 'reply', 'status', 'events', 'artifacts', 'wait-resource'):
             raise ValueError('child attempt cannot control workspace lifecycle')
     return Runner(ctx)
 
@@ -58,6 +58,11 @@ def parser(json_errors=False):
     p.add_argument('action', choices=['list', 'ack'])
     p.add_argument('--project'); p.add_argument('--workspace')
     p.add_argument('--dispatch'); p.add_argument('--ids')
+    p = sub.add_parser('wait-resource')
+    p.add_argument('--project'); p.add_argument('--workspace')
+    p.add_argument('--question-id'); p.add_argument('--check', required=True)
+    p.add_argument('--escalation-id', action='append', default=[])
+    p.add_argument('--request-id', required=True)
     p = sub.add_parser('manifest')
     p.add_argument('action', choices=['create', 'verify'])
     p.add_argument('--checkout', required=True); p.add_argument('--manifest', required=True)
@@ -71,6 +76,11 @@ def parser(json_errors=False):
     p.add_argument('--known-scope', action='store_true', help='all dependency inputs are included in manifest roots')
     p.add_argument('--source'); p.add_argument('--copy'); p.add_argument('--heavy', action='store_true')
     p.add_argument('command', nargs='+')
+    p = sub.add_parser('observer')
+    p.add_argument('action', choices=['configure', 'start', 'status', 'mode', 'incidents', 'approve', 'pause', 'stop'])
+    for name in ('request-id', 'scope', 'file', 'mode', 'incident', 'plan'):
+        p.add_argument('--' + name)
+    p.add_argument('--json', action='store_true')
     p = sub.add_parser('manager')
     p.add_argument('action', choices=['start', 'status', 'stop'])
     p.add_argument('--request-id')
@@ -84,6 +94,13 @@ def parser(json_errors=False):
     p.add_argument('name', nargs='?')
     p.add_argument('--request-id')
     p.add_argument('--project', required=True); p.add_argument('--workspace', required=True)
+    p = sub.add_parser('autonomy')
+    p.add_argument('action', choices=['show', 'set'])
+    p.add_argument('--enabled', choices=['true', 'false'])
+    p.add_argument('--unlimited-passes', choices=['true', 'false'])
+    for name in ('project', 'workspace', 'request-id', 'generation', 'attempt', 'revision'):
+        p.add_argument('--' + name)
+    p.add_argument('--json', action='store_true')
     p = sub.add_parser('recovery')
     p.add_argument('--request-id')
     p.add_argument('action', choices=['status', 'on', 'off'])
@@ -148,6 +165,7 @@ def parser(json_errors=False):
         if command == '_runner': p.add_argument('--nonce', required=True)
         if command == 'retry':
             p.add_argument('--force', action='store_true'); p.add_argument('--refresh', action='store_true')
+            p.add_argument('--refresh-context', action='store_true', help='refresh project instructions and materials, keeping role settings')
             p.add_argument('--allow-extra-attempt', action='store_true', help='authorize one manual attempt beyond the automatic limit')
         if command == 'reply':
             p.add_argument('message_id'); p.add_argument('text', nargs='?'); p.add_argument('--file'); p.add_argument('--run-id')
@@ -211,6 +229,10 @@ def main(argv=None):
                     result = verification.reuse(args.source, inputs, attempt, args.output)
             print(json.dumps(result, ensure_ascii=False))
             return 0 if result['result'] == 'PASS' else 1
+        if args.cmd == 'observer':
+            from .observer_service import cli as observer_cli
+            print(json.dumps(observer_cli(args, catalog), ensure_ascii=False))
+            return 0
         if args.cmd == 'manager':
             if os.environ.get('TEAM_RUNNER_ATTEMPT'):
                 raise ValueError('child attempt cannot control manager lifecycle')
@@ -262,6 +284,11 @@ def main(argv=None):
                     else: data = catalog.workspace(args.project, values, args.workspace if args.action=='update' else None)
             print(json.dumps(data, ensure_ascii=False, indent=2)); return 0
         runner = selection(args, catalog)
+        if args.cmd == 'wait-resource':
+            from .resource_wait import register
+            result = register(runner, args.question_id, args.check, args.escalation_id, args.request_id)
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
         if args.cmd == 'artifacts':
             from . import artifacts
             if args.action == 'prepare':
@@ -298,6 +325,23 @@ def main(argv=None):
             result = (view(attempt) if args.action == 'list' else
                       acknowledge(runner, attempt, args.dispatch, (args.ids or '').split(',')))
             print(json.dumps(result, ensure_ascii=False)); return 0
+        if args.cmd == 'autonomy':
+            from .autonomy import view
+            from .application import submit_v1
+            if args.action == 'show':
+                data = view(runner)
+            else:
+                if args.enabled is None or not args.request_id or args.generation is None or args.attempt is None or not args.revision:
+                    raise ContractError('invalid_scope', '--enabled, --request-id, --generation, --attempt and --revision required')
+                payload = {'enabled': args.enabled == 'true'}
+                if args.unlimited_passes is not None:
+                    payload['unlimited_passes'] = args.unlimited_passes == 'true'
+                data = submit_v1(runner, {'schema_version': 1, 'request_id': args.request_id, 'action': 'autonomy',
+                    'payload': payload, 'scope': {'identity': runner.context.identity(),
+                    'generation': None if args.generation == 'null' else args.generation,
+                    'attempt': None if args.attempt == 'null' else args.attempt, 'revision': args.revision}})
+            print(json.dumps(data, ensure_ascii=False))
+            return _result_exit(data) if args.action == 'set' else 0
         if args.cmd == 'recovery':
             from .recovery import recovery_view
             if args.action == 'status':
@@ -408,6 +452,8 @@ def main(argv=None):
                 payload = {'operation_id': args.operation_id}
             elif args.cmd == 'retry':
                 payload = {key: getattr(args, key) for key in ('force', 'refresh', 'allow_extra_attempt')}
+                if args.refresh_context:
+                    payload['refresh_context'] = True
             data = submit_v1(runner, {'schema_version': 1, 'request_id': args.request_id,
                                     'action': args.cmd, 'payload': payload,
                                     'scope': {'identity': runner.context.identity(),

@@ -9,6 +9,7 @@ Unknown send outcomes require reconciliation; invocation never blindly resends.
 import argparse
 import json
 import os
+import time
 from pathlib import Path
 
 from .catalog import Catalog
@@ -65,15 +66,27 @@ def complete(payload, sender, task, dispatch, capability=None):
             raise ValueError('completion input changed; inspect existing receipt')
         if graph:
             from .runner_launch import Launcher
-            from .graph_dispatch import return_edge, current
+            from .graph_dispatch import return_edge, current, EdgeLimit
             launcher = Launcher(context)
             current(launcher, attempt)
-            with lock(attempt / 'agents.lock'):
-                reg = launcher.registry(attempt)
-                live = next(a for a in reg['agents'] if a['id'] == agent['id'])
-                if live.get('status') not in ('active', 'released'):
-                    raise ValueError('worker has an unresolved child or unknown state')
-                return_edge(launcher, attempt, reg, live, payload)
+            while True:
+                current(launcher, attempt)
+                try:
+                    with lock(attempt / 'agents.lock'):
+                        reg = launcher.registry(attempt)
+                        live = next(a for a in reg['agents'] if a['id'] == agent['id'])
+                        if live.get('status') not in ('active', 'released'):
+                            raise ValueError('worker has an unresolved child or unknown state')
+                        return_edge(launcher, attempt, reg, live, payload)
+                    break
+                except EdgeLimit:
+                    from .autonomy import policy
+                    from .engine import Runner
+                    if not policy(Runner(context))['enabled']:
+                        raise
+                    if reg.get('fenced') or reg.get('stop_requested'):
+                        raise RuntimeError('rework fenced/stopped')
+                    time.sleep(.2)  # Owner grants the exact call; this process never spends policy budget.
         if old is None:
             text = '\n'.join([
                 '# Worker result',

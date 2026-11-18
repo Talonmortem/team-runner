@@ -46,6 +46,39 @@ class Recovery(unittest.TestCase):
         self.runner.apply_control.assert_not_called()
         self.assertEqual(journal['phase'], 'completed')
 
+    def test_failed_relaunch_uses_its_entry_marker_instead_of_departed_old_pid(self):
+        identity = self.runner.context.identity()
+        nonce = 'new-launch'
+        self.runner.context.orca_id = 'fixture-worktree'
+        atomic_json(self.path / 'launch.json', {'nonce': nonce, 'identity': identity})
+        marker = {'nonce': 'runner-' + nonce + ':' + str((self.path / 'startup').resolve()),
+                  'pid': 456, 'process_stamp': 'new-stamp', 'boot_id': 'fixture-boot',
+                  'terminal': {'worktreeId': 'fixture-worktree', 'incarnationId': 'new-incarnation'}}
+        atomic_json(self.path / 'startup' / ('runner-' + nonce + '.entry.json'), marker)
+        journal = self.check()
+        self.assertEqual(journal['status'], 'observing', journal)
+        self.assertEqual(journal['evidence']['runner']['pid'], 456)
+        self.assertEqual(journal['evidence']['runner']['nonce'], nonce)
+        self.start.assert_called_once()
+
+    def test_foreign_or_live_old_process_cannot_be_replaced_by_entry_marker(self):
+        identity = self.runner.context.identity()
+        self.runner.context.orca_id = 'fixture-worktree'
+        atomic_json(self.path / 'launch.json', {'nonce': 'new-launch', 'identity': identity})
+        atomic_json(self.path / 'startup' / 'runner-new-launch.entry.json', {
+            'nonce': 'runner-new-launch:' + str((self.path / 'startup').resolve()),
+            'pid': 456, 'process_stamp': 'new-stamp',
+            'terminal': {'worktreeId': 'fixture-worktree', 'incarnationId': 'new-incarnation'}})
+        for foreign in (False, True):
+            with self.subTest(foreign=foreign):
+                (self.path / 'recovery.json').unlink(missing_ok=True)
+                atomic_json(self.path / 'runner-process.json', {'nonce': 'old', 'pid': 123,
+                            'process_stamp': 'old-stamp', 'identity': {'foreign': True} if foreign else identity})
+                self.departed.return_value = foreign
+                journal = self.check()
+                self.assertIn('unconfirmed', journal['reason'])
+                self.start.assert_not_called()
+
     def test_unknown_liveness_never_restarts(self):
         self.runner.launcher.liveness.return_value = 'unverifiable'
         journal = self.check()
@@ -54,9 +87,11 @@ class Recovery(unittest.TestCase):
 
     def test_acceptance_and_user_decisions_do_not_retry(self):
         for extra in ({'failed': True}, {'acceptance_rework': {}}, {'gate_id': 'gate'},
-                      {'messages': [{'type': 'question'}]}):
+                      {'messages': [{'type': 'question', 'run_id': 'parent', 'payload': {'dispatchId': 'dispatch'}}]}):
             with self.subTest(extra=extra):
                 self.state['current'].update(extra)
+                self.runner.launcher.registry.return_value = {'agents': [{'id': 'coordinator', 'role': 'coordinator',
+                    'dispatch_id': 'dispatch', 'run_id': 'parent', 'status': 'active'}], 'runs': []}
                 self.check()
                 self.start.assert_not_called()
                 self.runner.apply_control.assert_not_called()
@@ -142,6 +177,92 @@ class Recovery(unittest.TestCase):
         with lock(self.path / 'runner.lock'):
             self.check()
         self.assertFalse((self.path / 'recovery.json').exists())
+
+    def test_answered_question_closes_only_resolved_technical_incident(self):
+        from team_runner.runner_store import lock
+        question = {'id': 'q', 'type': 'question', 'run_id': 'parent',
+                    'payload': {'dispatchId': 'dispatch'}}
+        self.state['current']['messages'] = [question]
+        registry = {'agents': [{'id': 'coordinator', 'role': 'coordinator',
+                    'dispatch_id': 'dispatch', 'run_id': 'parent', 'status': 'active'}], 'runs': []}
+        self.runner.launcher.registry.return_value = registry
+        error = 'acceptance or user decision required; technical cleanup completed'
+        command = {'id': 'cleanup', 'status': 'error', 'error': error}
+        atomic_json(self.path / 'commands/cleanup.json', command)
+        incident = {'target': recovery.target(self.state), 'mode': 'live', 'status': 'needs_action',
+                    'checks': 1, 'reason': error, 'command_id': 'cleanup'}
+        atomic_json(self.path / 'recovery.json', incident)
+        with lock(self.path / 'runner.lock'):
+            self.supervisor.tick(self.runner)
+            self.assertEqual(read_json(self.path / 'recovery.json')['status'], 'needs_action')
+            question['answered'] = True
+            for extra in ({'failed': True}, {'problems': ['pending']}, {'acceptance_rework': {}},
+                          {'gate_id': 'gate'}):
+                with self.subTest(extra=extra):
+                    self.state['current'].update(extra)
+                    self.supervisor.tick(self.runner)
+                    self.assertEqual(read_json(self.path / 'recovery.json')['status'], 'needs_action')
+                    for key in extra:
+                        self.state['current'].pop(key)
+            registry['fenced'] = True
+            self.supervisor.tick(self.runner)
+            self.assertEqual(read_json(self.path / 'recovery.json')['status'], 'needs_action')
+            registry['fenced'] = False
+            self.supervisor.tick(self.runner)
+            journal = read_json(self.path / 'recovery.json')
+            self.assertEqual(journal['status'], 'observing')
+            self.assertEqual(journal['completed_command_id'], 'cleanup')
+            self.assertIsNone(journal['reason'])
+            self.supervisor.tick(self.runner)
+            self.assertEqual(read_json(self.path / 'recovery.json')['status'], 'observing')
+        self.assertEqual(read_json(self.path / 'commands/cleanup.json'), command)
+        self.assertEqual(len(list((self.path / 'commands').glob('*.json'))), 1)
+        self.start.assert_not_called()
+
+    def test_confirmed_live_owner_closes_only_resolved_dead_owner_incident(self):
+        from team_runner.runner_store import lock
+        self.departed.return_value = False
+        process = read_json(self.path / 'runner-process.json')
+        process['boot_id'] = 'boot'
+        atomic_json(self.path / 'runner-process.json', process)
+        incident = {'target': recovery.target(self.state), 'mode': 'dead', 'status': 'needs_action',
+                    'checks': 6, 'reason': 'runner no longer owns process lock'}
+        atomic_json(self.path / 'recovery.json', incident)
+        question = {'id': 'q', 'type': 'question', 'run_id': 'parent',
+                    'payload': {'dispatchId': 'dispatch'}}
+        self.state['current']['messages'] = [question]
+        self.runner.launcher.registry.return_value = {'agents': [{'id': 'coordinator',
+                    'role': 'coordinator', 'dispatch_id': 'dispatch', 'run_id': 'parent',
+                    'status': 'active'}], 'runs': []}
+        with lock(self.path / 'runner.lock'), \
+                patch('team_runner.runner_entry.process_stamp', return_value='fixture'), \
+                patch('team_runner.runner_entry.boot_id', return_value='boot'):
+            self.supervisor.tick(self.runner)
+            self.assertEqual(read_json(self.path / 'recovery.json'), incident)
+            question['answered'] = True
+            atomic_json(self.path / 'launch.json', {'nonce': 'wrong', 'identity': {'workspace': 'fixture'}})
+            self.supervisor.tick(self.runner)
+            self.assertEqual(read_json(self.path / 'recovery.json'), incident)
+            atomic_json(self.path / 'launch.json', {'nonce': 'nonce', 'identity': {'workspace': 'fixture'}})
+            for changed in ({'pid': None}, {'process_stamp': 'stale'}, {'boot_id': 'old-boot'}):
+                with self.subTest(changed=changed):
+                    atomic_json(self.path / 'runner-process.json', {**process, **changed})
+                    self.supervisor.tick(self.runner)
+                    self.assertEqual(read_json(self.path / 'recovery.json'), incident)
+            atomic_json(self.path / 'runner-process.json', process)
+            atomic_json(self.path / 'operations.json', {'effect': {'status': 'unknown'}})
+            self.supervisor.tick(self.runner)
+            self.assertNotEqual(read_json(self.path / 'recovery.json')['status'], 'observing')
+            atomic_json(self.path / 'operations.json', {})
+            atomic_json(self.path / 'recovery.json', incident)
+            self.supervisor.tick(self.runner)
+            journal = read_json(self.path / 'recovery.json')
+        self.assertEqual(journal['status'], 'observing')
+        self.assertEqual(journal['mode'], 'live')
+        self.assertEqual(journal['resolved_owner_nonce'], 'nonce')
+        self.assertEqual(journal['checks'], 6)
+        self.assertFalse((self.path / 'commands').exists())
+        self.start.assert_not_called()
 
     def test_live_enqueue_crash_uses_same_uuid(self):
         from team_runner.runner_store import lock

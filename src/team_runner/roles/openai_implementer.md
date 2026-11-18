@@ -6,7 +6,7 @@
 `$TEAM_RUNNER_ATTEMPT/config.json`; права и независимость роли сохраняются.
 
 - Runtime: Codex
-- Model: `gpt-6-luna` / xhigh (standard), `gpt-6.1-terra` / xhigh (medium) или `gpt-6.1-sol` / high (complex) в «Текущих агентах»; снимок роли/варианта имеет приоритет — см. $TEAM_RUNNER_MATERIALS/MODELS.md
+- Model: `gpt-6-luna` / xhigh (standard), `gpt-6.1-terra` / xhigh (medium) или `gpt-6.2-sol` / high (complex) в «Текущих агентах»; снимок роли/варианта имеет приоритет — см. $TEAM_RUNNER_MATERIALS/MODELS.md
 - Reasoning effort: `xhigh`
 - Access: workspace-write
 - Source: `/home/talonmortem/.codex/agents/openai-implementer.toml`
