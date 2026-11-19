@@ -354,12 +354,20 @@ def replace_executor(runner, state, attempt, reg, agent, observed, session, jour
     if session['replacements'] >= 1 or not allowed():
         raise ValueError('network replacement exhausted or cancelled')
     # Stop exact executor first; no new session until stopped + exited are proved.
-    closed = read_json(runner.launcher.journal(attempt), {}).get(agent['id'] + '-close', {})
+    operations_path = runner.launcher.journal(attempt)
+    close_key = agent['id'] + '-close'
+    closed = read_json(operations_path, {}).get(close_key, {})
     if closed.get('status') == 'completed':
-        if (closed.get('args') != ['terminal', 'close', '--terminal', agent.get('terminal')]
-                or (closed.get('evidence') or {}).get('incarnation') != agent.get('incarnation')):
+        if closed.get('args') != ['terminal', 'close', '--terminal', agent.get('terminal')]:
             raise ValueError('recorded terminal close identity mismatch')
-        operations.terminal_evidence(closed, runner.launcher.orca)
+        evidence = closed.get('evidence') or {}
+        if evidence.get('launch'):
+            operations.close_terminal(operations_path, close_key, runner.launcher.orca, agent['terminal'],
+                                      agent['incarnation'], runner.context.orca_id, mailbox=agent.get('mailbox'))
+        else:
+            if evidence.get('incarnation') != agent.get('incarnation'):
+                raise ValueError('recorded terminal close identity mismatch')
+            operations.terminal_evidence(closed, runner.launcher.orca)
     elif observed.get('terminalResource', {}).get('ownershipState') == 'external':
         runner.launcher.verify_terminal(agent, observed)
         runner.launcher.lifecycle(agent, 'worker-abandon')

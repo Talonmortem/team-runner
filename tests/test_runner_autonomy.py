@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from team_runner import autonomy, application, protocol, goal_intent, recovery, event_scope, state_time
 from team_runner import graph_dispatch as graph, network_recovery as network
+from team_runner.memory_admission import AdmissionCancelled
 from team_runner.runner_store import atomic_json, read_json, lock
 import test_team_graph as graph_fixtures
 from test_team_graph import small_graph
@@ -71,6 +72,7 @@ class Autonomy(unittest.TestCase):
         attempt, root = self.prepare(cfg); self.enable()
         _, child = self.delegate(attempt, root); self.finish(attempt, child)
         blocked, _ = self.delegate(attempt, root)
+        before_grant = self.a.launcher.registry(attempt)
         outputs, errors = [], []
         def grant():
             try:
@@ -84,13 +86,12 @@ class Autonomy(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(len(read_json(self.a.state_dir / 'autonomy-budget.json').popitem()[1]), 1)
         self.assertEqual(len(self.a.launcher.registry(attempt)['graph_grants']), 1)
-        reg = self.a.launcher.registry(attempt)
-        reg['graph_grants'] = {}; reg['edge_passes']['implement'] = 1
-        call = next(c for c in reg['graph_calls'] if c['id'] == blocked['id'])
-        call.update(status='limit'); call.pop('pass_taken')
-        self.a.launcher.save_registry(attempt, reg)
+        self.a.launcher.save_registry(attempt, before_grant)
         autonomy.grant(self.a, attempt, blocked['id'])
         self.assertEqual(autonomy.view(self.a)['budgets']['implement']['used'], 1)
+        self.assertEqual(self.a.launcher.registry(attempt)['edge_passes']['implement'], 1)
+        resumed, _ = self.delegate(attempt, root, request=blocked['id'])
+        self.assertEqual(resumed['status'], 'running')
         self.assertEqual(self.a.launcher.registry(attempt)['edge_passes']['implement'], 2)
 
     def test_budget_across_attempts_and_exhaustion_unknown_effect_barrier(self):
@@ -501,7 +502,7 @@ class Autonomy(unittest.TestCase):
                 network.reconcile(self.a, self.a.load_state(), data)
             stop['result']['processAction'] = 'none'; atomic_json(path, ops)
             state = self.a.load_state(); state['paused'] = True; self.a.save_state(state)
-            with self.assertRaisesRegex(ValueError, 'cancelled'):
+            with self.assertRaisesRegex(AdmissionCancelled, 'cancelled'):
                 network.reconcile(self.a, self.a.load_state(), data)
             self.assertNotIn(('terminal', 'close'), calls)
             state['paused'] = False; self.a.save_state(state)
@@ -537,8 +538,11 @@ class Autonomy(unittest.TestCase):
     def test_lost_external_abandon_receipt_finishes_cleanup_without_replaying(self):
         self.lost_external_cleanup_receipt('worker-abandon')
 
-    def test_lost_external_close_receipt_finishes_replacement_without_replaying(self):
+    def test_unconfirmed_external_close_blocks_replacement_without_replaying(self):
         self.lost_external_cleanup_receipt('close')
+
+    def test_verified_external_close_finishes_replacement_without_replaying(self):
+        self.lost_external_cleanup_receipt('verified-close')
 
     def test_reserved_network_replacement_continues_without_new_reservation(self):
         self.interrupted_network_replacement('reserved')
@@ -618,10 +622,26 @@ class Autonomy(unittest.TestCase):
                 if args[1] == verb and mutations.count(args[:2]) == 1:
                     raise RuntimeError('lost cleanup receipt')
             return result
+
         self.a.launcher.orca = transport
-        self.process()
+        if verb == 'verified-close':
+            close = self.a.launcher.close_registered_terminal
+
+            def interrupt_after_close(*args, **kwargs):
+                close(*args, **kwargs)
+                raise network.operations.UncertainOperation('interrupted after verified close')
+
+            with patch.object(self.a.launcher, 'close_registered_terminal', side_effect=interrupt_after_close):
+                self.process()
+        else:
+            self.process()
         self.assertIn('control_uncertain', self.a.load_state())
         self.now = 330; self.network_tick(); self.process()
+        if verb == 'close':
+            self.assertIn('control_uncertain', self.a.load_state())
+            self.assertEqual(mutations, [('orchestration', 'worker-abandon'), ('terminal', 'close')])
+            self.assertEqual(len(self.a.launcher.registry(attempt)['agents']), 2)
+            return
         self.assertNotIn('control_uncertain', self.a.load_state())
         self.assertEqual(mutations.count(('orchestration', 'worker-abandon')), 1)
         self.assertEqual(mutations.count(('terminal', 'close')), 1)

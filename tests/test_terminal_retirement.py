@@ -41,6 +41,19 @@ class TerminalRetirement(Fixture):
             operations.close_terminal(path, 'agent-close', call, 'owned', 'exact', 'fixture')
         call.assert_called_once_with('terminal', 'show', '--terminal', 'owned', mailbox=None)
 
+    def test_missing_nested_mailbox_keeps_other_incarnation_with_same_pty(self):
+        path, _, _ = self.receipt(self.root, 'mailbox')
+        other = {**self.neighbor, 'ptyId': self.terminal['ptyId'], 'leafId': self.terminal['leafId']}
+        listing = {'terminals': [other], 'truncated': False,
+                   'hostScope': {'hostIds': ['local'], 'omittedHostIds': []}}
+        call = Mock(side_effect=[RuntimeError('stale'), listing])
+        with patch('team_runner.project_services.departed', return_value=True):
+            proof = operations.close_terminal(path, 'mailbox-close', call, 'owned', 'exact', 'fixture',
+                                              allow_absent=True)
+        self.assertEqual(proof['terminal'], self.terminal)
+        self.assertEqual([c.args[:2] for c in call.call_args_list], [('terminal', 'show'), ('terminal', 'list')])
+        self.assertNotIn('mailbox-close', store.read_json(path))
+
     def test_close_reply_requires_process_exit_and_ignores_unrelated_hosts(self):
         path, _, _ = self.receipt(self.root, 'agent-terminal')
         call = Mock(side_effect=[{'terminal': self.terminal},

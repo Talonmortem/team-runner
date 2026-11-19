@@ -6,8 +6,8 @@ ID is accepted only when it is unique across the goal; legacy state written befo
 qualified keys may still carry an ambiguous bare ID and resolves to the first match,
 which is what such state was dispatched and verified against.
 """
-import json
 from pathlib import Path
+from .runner_store import decode_json
 
 SEP = "/"
 
@@ -16,7 +16,8 @@ class Tracking:
     def __init__(self, goal_dir):
         self.goal_dir = Path(goal_dir).resolve()
         self.checkout = next((p for p in (self.goal_dir, *self.goal_dir.parents) if (p / '.git').exists()), self.goal_dir)
-        self.goal = json.loads((goal_dir / "Tasks.json").read_text())
+        path = self.goal_dir / "Tasks.json"
+        self.goal = decode_json(path.read_text(), path)
 
     def features(self):
         for f in self.goal["queue"]:
@@ -24,7 +25,7 @@ class Tracking:
             if not path.is_relative_to(self.goal_dir):
                 raise ValueError("feature tracking escapes goal directory")
             if path.exists():
-                yield f, path, json.loads(path.read_text())
+                yield f, path, decode_json(path.read_text(), path)
 
     @staticmethod
     def key(feat, t):

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import tomllib
+from .runner_store import decode_json
 
 DEFAULTS = Path(__file__).with_name('runner-defaults.json')
 ROLES = ('coordinator', 'planner', 'explorer', 'implementer_standard',
@@ -305,7 +306,8 @@ def settings_update(payload, current, catalog=None, repo=None, config_root=None)
 def snapshot_role(attempt, role, variant='primary'):
     if variant not in ('primary', 'reserve'):
         raise ValueError('unsupported role variant')
-    snapshot = json.loads((Path(attempt) / 'config.json').read_text())
+    path = Path(attempt) / 'config.json'
+    snapshot = decode_json(path.read_text(), path)
     if snapshot.get('version') == 3:
         matches = [n for n in snapshot['nodes'] if n['id'] == (snapshot['root'] if role == 'coordinator' else role)]
         if not matches:
@@ -330,7 +332,7 @@ def load_config(state_dir, path=None, overrides=None, catalog=None, layers=(), r
             merge_role(cfg["roles"][role], fields, catalog)
     source = Path(path).expanduser() if path else Path(state_dir) / 'config.json'
     if source.exists():
-        saved = json.loads(source.read_text())
+        saved = decode_json(source.read_text(), source)
         version = saved.get('version', 1)
         if version == 3:
             cfg = validate(saved, catalog, repo, config_root, allow_unavailable_fast=allow_unavailable_fast)

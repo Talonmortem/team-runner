@@ -36,6 +36,21 @@ class Protocol(unittest.TestCase):
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=2)
 
+    def test_json_diagnostics_include_source_and_position_without_contents(self):
+        from subprocess import CompletedProcess
+        from team_runner import orca
+        path = self.root / 'broken.json'
+        path.write_text('{"private-data":\n  !}')
+        with self.assertRaisesRegex(ValueError, r'broken.json: .*line 2 column 3') as error:
+            from team_runner.runner_store import read_json
+            read_json(path)
+        self.assertNotIn('private-data', str(error.exception))
+        result = CompletedProcess([], 1, stdout=path.read_text(), stderr='private-stderr')
+        with patch.object(orca.subprocess, 'run', return_value=result), \
+                self.assertRaisesRegex(RuntimeError, r'Orca orchestration reply: invalid JSON at line 2, column 3') as error:
+            orca.call('orchestration', 'reply', '--body', 'private-argument')
+        self.assertNotIn('private-', str(error.exception))
+
     def test_cli_http_parity_without_service_or_state_creation(self):
         with patch('team_runner.project_services.ProjectServices.forward', side_effect=AssertionError('RPC')), \
                 patch.object(self.a, 'orca', side_effect=AssertionError('Orca')):

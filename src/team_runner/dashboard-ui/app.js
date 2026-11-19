@@ -547,18 +547,31 @@ function compactStatus(value) {
 function renderDiagnostics() {
   const facts = state?.diagnostics;
   const messages = state?.messages || [];
-  cached($('diagnostics-view'), [facts, messages], parent => {
+  const {duration_seconds: duration, ...incident} = facts?.waits?.liveness || {};
+  const diagnostics = duration == null ? facts : {...facts, waits: {...facts.waits, liveness: incident}};
+  cached($('diagnostics-view'), [diagnostics, messages], parent => {
     const opened = new Set([...parent.querySelectorAll('details[open]')].map(e => e.id));
     parent.replaceChildren();
     if (!facts) return hint(parent, 'Диагностика недоступна');
     for (const [key, title, hasStatus] of [['orca', 'Orca', true], ['service', 'Сервис проекта', true],
       ['observer', 'Инфраструктурный observer', true], ['waits', 'Ожидания'], ['verification', 'Результаты проверок'],
       ['commands', 'История команд'], ['operations', 'Операции']]) {
-      const value = facts[key];
+      const value = diagnostics[key];
       const detail = node('details', null, parent, {class: 'diagnostic', id: 'diagnostic-' + key});
       detail.open = opened.has(detail.id);
       const suffix = hasStatus ? ' · ' + compactStatus(value) : Array.isArray(value) ? ' · ' + value.length : '';
       node('summary', title + suffix, detail);
+      if (key === 'waits' && value?.liveness) {
+        node('h3', 'Состояние координатора не подтверждено', detail);
+        node('p', null, detail, {id: 'liveness-duration'});
+        fields(detail, [
+          ['Dispatch', incident.scope.dispatch],
+          ['Начало', new Date(incident.started_at * 1000).toLocaleString()],
+          ['Причина', incident.reason],
+          ['Сверка', ({matched: 'Записи совпадают', unconfirmed: 'Записи не подтверждены',
+            unavailable: 'Данные недоступны', interrupted: 'Сверка начата'})[incident.diagnosis?.status] || 'Не выполнялась'],
+        ]);
+      }
       if (key === 'waits' && messages.length) {
         for (const message of messages) {
           const notice = node('div', null, detail, {class: 'agent-card'});
@@ -576,6 +589,8 @@ function renderDiagnostics() {
       else node('pre', JSON.stringify(value, null, 2), detail);
     }
   });
+  const elapsed = $('liveness-duration');
+  if (elapsed) elapsed.textContent = 'Длительность · ' + duration + ' с';
 }
 
 async function refresh() {

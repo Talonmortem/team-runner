@@ -8,9 +8,16 @@ import tempfile
 import uuid
 
 
+def decode_json(content, source):
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise json.JSONDecodeError(f'{source}: {exc.msg}', exc.doc, exc.pos) from None
+
+
 def read_json(path, default=None):
     path = Path(path)
-    return json.loads(path.read_text()) if path.exists() else default
+    return decode_json(path.read_text(), path) if path.exists() else default
 
 
 def atomic_json(path, value):

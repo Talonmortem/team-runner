@@ -7,6 +7,7 @@ from . import runner_config, team_graph
 from .application import _check_identity, require_scope
 from .event_scope import pending
 from .network_recovery import view as network_view
+from .recovery import liveness_incident
 from .protocol import ContractError, attempt_identity, operation, summary
 from .runner_store import read_json
 from .verification import view as verification
@@ -148,7 +149,8 @@ def view(runner, services, observer, *, enable_actions=False):
                             'service': services.status(runner.context.project_id, read_only=True),
                             'observer': observer_status,
                             'waits': {'resources': resource_waits, 'recovery': status['recovery'],
-                                      'graph_calls': registry.get('graph_calls', []), 'network': network},
+                                      'graph_calls': registry.get('graph_calls', []), 'network': network,
+                                      'liveness': liveness_incident(runner, state)},
                             'verification': checks_view,
                             'commands': commands, 'operations': operations}}
 

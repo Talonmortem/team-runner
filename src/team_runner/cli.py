@@ -8,6 +8,7 @@ import sys
 from .catalog import Catalog
 from .engine import Runner
 from .protocol import ContractError
+from .runner_store import decode_json
 
 
 def selection(args, catalog):
@@ -172,6 +173,9 @@ def parser(json_errors=False):
             p.add_argument('--force', action='store_true'); p.add_argument('--refresh', action='store_true')
             p.add_argument('--refresh-context', action='store_true', help='refresh project instructions and materials, keeping role settings')
             p.add_argument('--allow-extra-attempt', action='store_true', help='authorize one manual attempt beyond the automatic limit')
+            p.add_argument('--reset-attempts', action='store_true', help='reset the attempt counter for the current item and keep its history')
+            p.add_argument('--reset-reason', choices=['infrastructure', 'task', 'other'],
+                           help='record the reason for --reset-attempts')
         if command == 'reply':
             p.add_argument('message_id'); p.add_argument('text', nargs='?'); p.add_argument('--file'); p.add_argument('--run-id')
         if command == 'resolve': p.add_argument('choice', choices=['start','skip','stop'])
@@ -282,8 +286,8 @@ def main(argv=None):
             else:
                 values = {k: getattr(args,k) for k in ('name','path','orca_id','orca_instance') if getattr(args,k) is not None}
                 if args.cmd == 'project' and args.service_port is not None: values['service_port'] = args.service_port
-                if args.profile_file: values['profile'] = json.loads(Path(args.profile_file).read_text())
-                if args.roles_file: values['roles'] = json.loads(Path(args.roles_file).read_text())
+                if args.profile_file: values['profile'] = decode_json(Path(args.profile_file).read_text(), args.profile_file)
+                if args.roles_file: values['roles'] = decode_json(Path(args.roles_file).read_text(), args.roles_file)
                 if args.cmd == 'project':
                     if args.action == 'update' and not args.project: raise ValueError('--project required')
                     data = catalog.project(project_id=args.project if args.action=='update' else None, values=values)
@@ -304,7 +308,7 @@ def main(argv=None):
             if args.action == 'prepare':
                 if not args.argv_file or not args.apply:
                     raise ValueError('prepare requires --argv-file and --apply')
-                result = artifacts.prepare(runner, args.attempt, json.loads(Path(args.argv_file).read_text()),
+                result = artifacts.prepare(runner, args.attempt, decode_json(Path(args.argv_file).read_text(), args.argv_file),
                                            reserve_gib=args.reserve_gib, required_gib=args.required_gib,
                                            limit_gib=args.limit_gib)
                 print(json.dumps(result, ensure_ascii=False, indent=2)); return 0 if result['exit_code'] == 0 else 1
@@ -384,7 +388,7 @@ def main(argv=None):
             print(json.dumps(data, ensure_ascii=False, indent=2)); return 0
         if args.cmd == 'command':
             from .application import submit_v1
-            result = submit_v1(runner, json.loads(Path(args.file).read_text()))
+            result = submit_v1(runner, decode_json(Path(args.file).read_text(), args.file))
             print(json.dumps(result, ensure_ascii=False))
             return _result_exit(result) if args.json else (1 if result['status'] in ('failed', 'unknown') else 0)
         if args.cmd == '_runner':
@@ -462,6 +466,10 @@ def main(argv=None):
                 payload = {'operation_id': args.operation_id}
             elif args.cmd == 'retry':
                 payload = {key: getattr(args, key) for key in ('force', 'refresh', 'allow_extra_attempt')}
+                if args.reset_attempts:
+                    payload['reset_attempts'] = True
+                if args.reset_reason is not None:
+                    payload['reset_reason'] = args.reset_reason
                 if args.refresh_context:
                     payload['refresh_context'] = True
             data = submit_v1(runner, {'schema_version': 1, 'request_id': args.request_id,

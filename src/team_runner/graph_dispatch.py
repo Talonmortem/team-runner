@@ -6,11 +6,12 @@ import copy
 from contextlib import nullcontext
 import json
 import os
+import subprocess
 from pathlib import Path
 import time
 import uuid
 
-from . import memory_admission
+from . import memory_admission, runner_operations as operations
 from .protocol import request_id
 from .runner_store import lock, read_json
 from .team_graph import node
@@ -371,34 +372,139 @@ def rework_problems(reg, parent_id=None):
     return problems
 
 
+def settle_reports(launcher, attempt, reg, coordinator, reports, conflicts, *, permitted=None, probe_unreported=False):
+    if reg.get('stop_requested'):
+        return []
+    issues = []
+    # Calls are appended after their ancestors. Close descendants before parents.
+    for call in reversed(reg.get('graph_calls', [])):
+        if call.get('kind') != 'delegation' or call['status'] in TERMINAL or not call.get('dispatch_id'):
+            continue
+        agent = next((a for a in reg['agents'] if a.get('id') == call.get('child_agent')), None)
+        report = reports.get(call['dispatch_id'])
+        if report and permitted is not None and not permitted():
+            raise RuntimeError('cleanup cancelled by user intent')
+        try:
+            if not agent or call['dispatch_id'] in conflicts:
+                raise RuntimeError('conflicting graph call or worker_done identity')
+            if not report and call['status'] != 'settling':
+                if probe_unreported and agent.get('status') == 'active':
+                    observe_completion(launcher, agent, None)
+                continue
+            if not report:
+                raise RuntimeError('settling graph call is missing its accepted worker_done')
+            root = ancestors(reg, agent)[-1]
+            if (not coordinator or root.get('role') != 'coordinator' or root.get('dispatch_id') != coordinator
+                    or root.get('attempt') != str(attempt) or root.get('superseded_by')):
+                raise RuntimeError('graph call does not belong to the current coordinator')
+            if any(c['parent_agent'] == agent['id'] and c['status'] not in TERMINAL for c in reg['graph_calls']):
+                continue
+            settle(launcher, attempt, reg, agent, report)
+        except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
+            issues.append(f"{call['id']}: {exc}")
+            if agent:
+                agent.update(status='unknown', cleanup_error=str(exc))
+    if issues:
+        reg['fenced'] = True
+        reg['recovery_issues'] = list(dict.fromkeys([*reg.get('recovery_issues', []), *issues]))
+        launcher.save_registry(attempt, reg)
+    return issues
+
+
+def observe_completion(launcher, agent, report):
+    data = launcher.observe_agent(agent)
+    dispatch = data.get('dispatch') or {}
+    status = dispatch.get('status')
+    worker_state = (data.get('worker') or {}).get('state')
+    known_failure = status == 'failed' and report and report.get('outcome') == 'failed'
+    if (dispatch.get('id', agent['dispatch_id']) != agent['dispatch_id']
+            or dispatch.get('runId', agent['run_id']) != agent['run_id']
+            or worker_state == 'outcome_unknown'
+            or status not in ('dispatched', 'completed') and not known_failure
+            or worker_state == 'failed' and not known_failure
+            or not report and (data.get('observation') or {}).get('status') == 'exited'):
+        raise RuntimeError('child outcome unknown or worker exited without accepted worker_done')
+    return status == 'completed' or known_failure
+
+
 def settle(launcher, attempt, reg, agent, report):
-    call = next(c for c in reg['graph_calls'] if c['id'] == agent['call_id'])
-    if any(c['parent_agent'] == agent['id'] and c['status'] not in TERMINAL for c in reg['graph_calls']):
-        raise RuntimeError('parent completed with an unresolved child')
-    if report.get('outcome') == 'succeeded' and rework_problems(reg, agent['id']):
+    call = next((c for c in reg['graph_calls'] if c['id'] == agent.get('call_id')), None)
+    if (not call or call['kind'] != 'delegation' or call.get('child_agent') != agent['id']
+            or call.get('dispatch_id') != agent.get('dispatch_id') or agent.get('attempt') != str(attempt)
+            or call.get('parent_agent') != agent.get('parent_agent')
+            or agent.get('superseded_by') or agent.get('status') in ('stopped', 'superseded')
+            or any(a is not agent and a.get('dispatch_id') == agent['dispatch_id'] for a in reg['agents'])
+            or report.get('dispatchId') != agent['dispatch_id']
+            or report.get('runId', agent['run_id']) != agent['run_id']
+            or report.get('taskId', agent['task_id']) != agent['task_id']
+            or report.get('outcome') not in ('succeeded', 'failed')):
+        raise RuntimeError('accepted worker_done does not match registered graph call')
+    parent = next((a for a in reg['agents'] if a['id'] == call['parent_agent']), None)
+    if parent is None or parent.get('waiting_call') != call['id']:
+        raise RuntimeError('parent is not waiting for this graph call')
+    if report['outcome'] == 'succeeded' and rework_problems(reg, agent['id']):
         raise RuntimeError('parent completed before successful recheck')
-    # Transport supports succeeded/failed. A local immutable report carries the
-    # richer result; failed transport can never satisfy successful acceptance.
     payload = read_json(Path(attempt) / 'reports' / (agent['id'] + '-summary.json'), {})
     if payload.get('outcome') == 'changes_requested':
         returned = next((c for c in reg['graph_calls'] if c['id'] == 'return-' + agent['id']), None)
         if (not returned or returned['status'] != 'completed' or returned.get('result') != payload
-                or report.get('outcome') != 'failed'):
+                or report['outcome'] != 'failed'):
             raise RuntimeError('unconfirmed rework return')
+    elif payload and payload.get('outcome') != report['outcome']:
+        raise RuntimeError('local summary conflicts with accepted worker_done')
     result = copy.deepcopy(report)
     if payload:
+        if payload.get('dispatchId', report['dispatchId']) != report['dispatchId']:
+            raise RuntimeError('local summary belongs to a different Dispatch')
         result.update(payload)
         if payload.get('return_edge'):
             result['handoff_instructions'] = next(e['instructions'] for e in snapshot(launcher, attempt)['edges'] if e['id'] == payload['return_edge'])
-    call.update(status='settling', result=result)
-    launcher.save_registry(attempt, reg)
-    if agent.get('status') != 'released':
+
+    journal = read_json(launcher.journal(attempt), {})
+    close_key = agent['id'] + '-close'
+    closed = journal.get(close_key)
+    release = journal.get(agent['id'] + '-worker-release')
+    if call['status'] == 'settling' and call.get('result') != result:
+        raise RuntimeError('accepted worker_done conflicts with pending settlement')
+    if call['status'] == 'settling' and closed:
+        if (not (closed.get('evidence') or {}).get('launch')
+                or closed.get('args') != ['terminal', 'close', '--terminal', agent.get('terminal')]
+                or not isinstance(closed.get('result'), dict)):
+            raise RuntimeError('terminal close outcome unconfirmed')
+        if closed.get('stage') == 'close_verified':
+            evidence = closed['evidence']
+            expected = evidence.get('terminal') or {}
+            launch = journal.get(evidence['launch'], {})
+            registered = (launch.get('result') or {}).get('terminal') or {}
+            confirmed = closed['result'].get('terminal') or {}
+            if (launch.get('status') != 'completed' or any(not expected.get(k)
+                    or expected[k] != registered.get(k) or expected[k] != confirmed.get(k)
+                    for k in ('handle', 'incarnationId', 'ptyId', 'worktreeId'))):
+                raise RuntimeError('terminal close receipt conflicts with registered launch')
+        proof = operations.close_terminal(launcher.journal(attempt), close_key, launcher.orca,
+                                          agent['terminal'], agent['incarnation'], launcher.context.orca_id,
+                                          mailbox=agent.get('mailbox'))
+        agent.update(terminal_closed=True, close_evidence=proof)
+    elif call['status'] == 'settling' and release:
+        if (release.get('status') != 'completed'
+                or release.get('args') != ['orchestration', 'worker-release', '--dispatch', agent['dispatch_id']]
+                or launcher.liveness(agent['dispatch_id'], agent.get('mailbox')) != 'exited'):
+            raise RuntimeError('worker release outcome unconfirmed')
+    else:
+        if closed or release or agent.get('status') == 'released':
+            raise RuntimeError('unexpected close or release evidence for graph call')
+        launcher.check_operations(attempt)
+        if not observe_completion(launcher, agent, report):
+            return
+        call.update(status='settling', result=result)
+        launcher.save_registry(attempt, reg)
         launcher.release_agent(agent, attempt, report)
-    parent = next(a for a in reg['agents'] if a['id'] == call['parent_agent'])
+    agent['status'] = 'released'
+    agent.pop('cleanup_error', None)
+    agent.pop('error', None)
     call.update(status='completed', result=result)
-    if parent.get('waiting_call') == call['id']:
-        parent.update(status='active')
-        parent.pop('waiting_call', None)
+    parent.update(status='active')
+    parent.pop('waiting_call', None)
     launcher.save_registry(attempt, reg)
 
 

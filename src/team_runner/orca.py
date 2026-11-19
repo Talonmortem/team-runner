@@ -8,6 +8,10 @@ from pathlib import Path
 from . import runner_operations as operations
 
 
+class OrcaJSONError(RuntimeError):
+    pass
+
+
 def executable():
     if os.environ.get('ORCA_CLI_COMMAND'):
         return os.environ['ORCA_CLI_COMMAND']
@@ -42,8 +46,9 @@ def call(*args, timeout=60, mailbox=None, context=None):
                        cwd=context.repo if context else None, capture_output=True, text=True, timeout=timeout,
                        pass_fds=((operations.inherited_lock.get(),) if operations.inherited_lock.get() is not None else ()))
     try: value = json.loads(p.stdout)
-    except json.JSONDecodeError:
-        raise RuntimeError(f'Orca {args[:2]}: invalid response (exit {p.returncode})') from None
+    except json.JSONDecodeError as exc:
+        operation = ' '.join(str(arg) for arg in args[:2] if not str(arg).startswith('-'))
+        raise OrcaJSONError(f'Orca {operation}: invalid JSON at line {exc.lineno}, column {exc.colno} (exit {p.returncode})') from None
     if p.returncode or not value.get('ok'):
         error = value.get('error') or {}
         exc = RuntimeError(f"Orca {args[:2]}: {error.get('code', 'failed')}: {error.get('message', '')[:500]}")

@@ -59,6 +59,39 @@ class ExtraAttempt(Fixture):
                 launch.save_registry(attempt, {'agents': [], 'runs': [{'status': 'ready'}]})
             else:
                 st['stop_status'] = 'unknown'
-            with self.subTest(kind=kind), self.assertRaises(ValueError):
-                runner.apply_control(st, 'retry', {'allow_extra_attempt': True})
-            self.assertEqual(st['current']['attempt'], 3)
+            for option in ('allow_extra_attempt', 'reset_attempts'):
+                with self.subTest(kind=kind, option=option), self.assertRaises(ValueError):
+                    runner.apply_control(st, 'retry', {option: True})
+                self.assertEqual(st['current']['attempt'], 3)
+
+    def test_reset_preserves_history_and_continuation(self):
+        from types import SimpleNamespace
+
+        attempt, state = self.stopped()
+        state['mailbox'] = 'main'
+        command = str(uuid.uuid4())
+        runner.apply_control(state, 'retry', {'reset_attempts': True}, command)
+        current = state['current']
+        self.assertEqual(current['attempt'], 1)
+        self.assertEqual(current['attempt_reset'], {'previous_attempt': 3, 'command_id': command, 'reason': 'unspecified'})
+        self.assertEqual(current['retry_context_from'], str(attempt))
+        self.assertEqual(state['attempts'][-1]['attempt'], 3)
+        self.assertEqual(current['retry_config'], store.read_json(attempt / 'config.json'))
+
+        args = SimpleNamespace(mode='auto', config=None)
+        with patch.object(runner, 'effect', return_value={'task': {'id': 'fresh-task'}}) as create, \
+                patch.object(launch, 'launch', return_value={'dispatch_id': 'fresh-dispatch'}), \
+                patch.object(runner, 'process_controls'), patch.object(runner, 'notify'):
+            runner.start_coordinator(args, state, 'X', 'spec', 'title')
+        self.assertIn('продолжение прошлой попытки', create.call_args.args[create.call_args.args.index('--spec') + 1])
+
+    def test_reset_records_explicit_reason_and_validates_before_changing_intent(self):
+        attempt, _ = self.stopped()
+        recovery.set_intent(runner, 'stopped')
+        with self.assertRaisesRegex(ValueError, 'reset_reason requires reset_attempts'):
+            runner.submit_control('retry', {'reset_reason': 'task'})
+        self.assertEqual(recovery.settings(runner)['intent'], 'stopped')
+        self.assertEqual(runner.load_state()['current']['attempt_dir'], str(attempt))
+        result = runner.submit_control('retry', {'reset_attempts': True, 'reset_reason': 'infrastructure'})
+        self.assertEqual(result['status'], 'done')
+        self.assertEqual(runner.load_state()['current']['attempt_reset']['reason'], 'infrastructure')

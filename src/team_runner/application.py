@@ -304,7 +304,7 @@ def _control_payload(action, payload):
             raise ContractError('invalid_payload', 'Configuration must be an object')
         return
     fields = {'pause': set(), 'stop': set(), 'reconcile': set(),
-              'retry': {'force', 'refresh', 'refresh_context', 'allow_extra_attempt', 'saved_settings'},
+              'retry': {'force', 'refresh', 'refresh_context', 'allow_extra_attempt', 'reset_attempts', 'reset_reason', 'saved_settings'},
               'reply': {'message_id', 'text', 'run_id'}, 'resolve': {'choice'},
               'resolve-escalation': {'message_id', 'text', 'run_id'},
               'continue-operation': {'operation_id'}}
@@ -312,8 +312,11 @@ def _control_payload(action, payload):
         raise ContractError('unknown_action', 'Unsupported command action')
     if not isinstance(payload, dict) or set(payload) - fields[action]:
         raise ContractError('invalid_payload', 'Unknown command fields')
-    if action == 'retry' and any(type(v) is not bool for v in payload.values()):
+    if action == 'retry' and any(type(v) is not bool for k, v in payload.items() if k != 'reset_reason'):
         raise ContractError('invalid_payload', 'Retry options must be booleans')
+    if action == 'retry' and 'reset_reason' in payload and (
+            payload.get('reset_attempts') is not True or payload['reset_reason'] not in ('infrastructure', 'task', 'other')):
+        raise ContractError('invalid_payload', 'reset_reason requires reset_attempts and must be infrastructure, task or other')
     if action == 'retry' and payload.get('saved_settings') and not payload.get('refresh'):
         raise ContractError('invalid_payload', 'saved settings require explicit refresh')
     if action in ('reply', 'resolve-escalation') and (not isinstance(payload.get('message_id'), str) or not payload['message_id']
@@ -471,6 +474,9 @@ def process_v1(runner, state, path, record):
         record.update(status='pending', result={'state': 'waiting_memory', 'reason': exc.status['reason']}, error=None)
     except ContractError as exc:
         record.update(status='failed', error=exc.as_dict())
+    except runner_operations.RejectedOperation as exc:
+        runner.save_state(state)
+        record.update(status='failed', error=ContractError('command_rejected', str(exc)).as_dict())
     except runner_operations.UncertainOperation as exc:
         state.setdefault('control_uncertain', record['id'])
         runner.save_state(state)

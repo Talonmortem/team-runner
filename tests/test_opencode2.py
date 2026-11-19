@@ -141,7 +141,7 @@ class OpenCode2(unittest.TestCase):
         changed = self.configured('tester')
         changed['roles']['tester']['model'] = 'model-a'
         atomic_json(self.ctx.settings_dir / 'config.json', changed)
-        with patch.object(self.launcher, '_launch', side_effect=lambda a, r, rec, *args: rec):
+        with patch.object(self.launcher, '_launch', side_effect=lambda a, r, rec, *args, **kwargs: rec):
             record = self.launcher.launch(attempt, 'tester', 'task', 'run', 'title', self.ctx.state_dir)
         self.assertEqual(record['requested'], self.role)
         self.assertEqual((attempt / 'config.json').read_bytes(), before)

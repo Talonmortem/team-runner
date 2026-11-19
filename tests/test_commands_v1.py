@@ -69,6 +69,62 @@ class CommandsV1(unittest.TestCase):
         self.assertNotIn('answered', messages[0])
         self.assertTrue(messages[1]['answered'])
 
+    def test_interrupted_reply_requires_its_own_receipt_and_preserves_command(self):
+        self.a.save_state({'run_id': 'owner', 'mailbox': 'old', 'history': [], 'current': {'item': 'one',
+            'messages': [{'id': 'q', 'run_id': 'owner', 'type': 'question'}]}})
+        data = {'message_id': 'q', 'run_id': 'owner', 'text': 'yes'}
+        sends, receipts = [], {}
+        receipt_visible = False
+
+        def transport(*args, mailbox):
+            if args[:2] == ('orchestration', 'request-show'):
+                self.assertEqual(mailbox, 'new')
+                if receipt_visible:
+                    return {'state': 'completed', 'receipt': receipts[args[-1]]}
+                return {'state': 'pending'}
+            self.assertEqual(args[:2], ('orchestration', 'reply'))
+            sends.append((mailbox, args[-1]))
+            if mailbox == 'old':
+                exc = RuntimeError('stable pane required')
+                exc.receipt = {'ok': False, 'error': {'code': 'stable_pane_required'}}
+                raise exc
+            result = {'message': {'id': 'delivered'}}
+            receipts[args[-1]] = {'ok': True, 'result': result}
+            return result
+
+        def interrupt(stage):
+            if stage == 'reply:after_effect':
+                raise SystemExit(86)
+
+        with patch.object(self.a, 'orca', side_effect=transport):
+            first = self.command('reply', data)
+            self.assertEqual(application.submit_v1(self.a, first)['status'], 'failed')
+            self.a.save_state(dict(self.a.load_state(), mailbox='new'))
+            second = self.command('reply', data)
+            with patch('team_runner.runner_operations.checkpoint', side_effect=interrupt), self.assertRaises(SystemExit):
+                application.submit_v1(self.a, second)
+            with lock(self.a.state_dir / 'runner.lock'):
+                self.a.process_controls(self.a.load_state())
+            path = self.a.state_dir / 'commands' / (second['request_id'] + '.json')
+            before = path.read_bytes()
+            self.assertEqual(application.submit_v1(self.a, second)['status'], 'unknown')
+            third = self.command('reply', data)
+            self.assertEqual(application.submit_v1(self.a, third)['status'], 'pending')
+            st = self.a.load_state()
+            self.a.recover(st)
+            self.assertEqual(st['control_uncertain'], second['request_id'])
+            self.assertFalse(st['current']['messages'][0].get('answered'))
+            receipt_visible = True
+            self.a.recover(st)
+            self.assertNotIn('control_uncertain', st)
+            self.assertTrue(st['current']['messages'][0]['answered'])
+            self.assertEqual(path.read_bytes(), before)
+            with lock(self.a.state_dir / 'runner.lock'):
+                self.a.process_controls(self.a.load_state())
+            self.assertEqual(protocol.operation(self.a, third['request_id'])['status'], 'succeeded')
+        self.assertEqual([mailbox for mailbox, _ in sends], ['old', 'new'])
+        self.assertEqual(list(receipts), [sends[-1][1]])
+
     def test_exact_retry_returns_immutable_receipt_conflict_rejected(self):
         command = self.command()
         result = application.submit_v1(self.a, command)
@@ -159,7 +215,9 @@ class CommandsV1(unittest.TestCase):
 
     def test_internal_payload_and_version_rejected_before_persistence(self):
         for patching in ({'payload': {'_target': 'other'}}, {'schema_version': 2},
-                         {'action': 'retry', 'payload': {'force': 'yes'}}):
+                         {'action': 'retry', 'payload': {'force': 'yes'}},
+                         {'action': 'retry', 'payload': {'reset_reason': 'task'}},
+                         {'action': 'retry', 'payload': {'reset_attempts': True, 'reset_reason': 'unknown'}}):
             command = self.command(); command.update(patching)
             with self.assertRaises(protocol.ContractError):
                 application.submit_v1(self.a, command)
@@ -307,7 +365,10 @@ class CommandsV1(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), before)
 
     def test_http_and_cli_submit_same_envelope_returns_same_receipt(self):
-        command = self.command()
+        from team_runner.engine import Runner
+        self.a.save_state({'run_id': 'owner', 'history': [], 'current': {'item': 'one',
+            'messages': [{'id': 'q', 'run_id': 'owner', 'type': 'question'}]}})
+        command = self.command('reply', {'message_id': 'q', 'run_id': 'owner', 'text': 'yes'})
         server, token = runner_ui.make_server(self.catalog, project_id=self.a.context.project_id)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         try:
@@ -317,12 +378,15 @@ class CommandsV1(unittest.TestCase):
             request = urllib.request.Request(url, data=json.dumps(command).encode(),
                         headers={'Authorization': 'Bearer ' + token, 'Origin': origin,
                                  'Content-Type': 'application/json'})
-            with urllib.request.urlopen(request) as response:
-                http_result = json.load(response)
-            path = self.root / 'command.json'; path.write_text(json.dumps(command))
-            with patch.object(cli, 'Catalog', return_value=self.catalog), contextlib.redirect_stdout(io.StringIO()) as out:
-                result = cli.main(['command', '--file', str(path), '--project', ctx.project_id,
-                                   '--workspace', ctx.workspace_id])
+            with patch.object(Runner, 'orca', return_value={'message': {'id': 'delivered'}}) as orca:
+                with urllib.request.urlopen(request) as response:
+                    http_result = json.load(response)
+                path = self.root / 'command.json'
+                path.write_text(json.dumps(command))
+                with patch.object(cli, 'Catalog', return_value=self.catalog), contextlib.redirect_stdout(io.StringIO()) as out:
+                    result = cli.main(['command', '--file', str(path), '--project', ctx.project_id,
+                                       '--workspace', ctx.workspace_id])
+                orca.assert_called_once()
             self.assertEqual(result, 0)
             self.assertEqual(http_result, json.loads(out.getvalue()))
             self.assertEqual(http_result['status'], 'succeeded')

@@ -69,6 +69,11 @@ class DashboardBrowserCheck(BrowserCheck):
         atomic_json(self.runner.state_file, {'goal': self.goal, 'history': [], 'current': {
             'attempt_dir': str(self.attempt), 'item': 'T1', 'dispatch_id': waiting['dispatch_id'],
         }})
+        atomic_json(self.runner.state_dir / 'liveness-incident.json', {
+            'scope': {'attempt': str(self.attempt), 'dispatch': waiting['dispatch_id']},
+            'started_at': time() - 60, 'visible': True,
+            'reason': 'Orca не подтвердила состояние координатора', 'diagnosis': {'status': 'matched'},
+        })
         legacy = Runner(self.fixture_catalog.context(*self.workspaces['Beta legacy']))
         legacy_attempt = legacy.state_dir / 'attempts' / 'legacy-fixture'
         legacy.context.snapshot(legacy_attempt)
@@ -250,6 +255,10 @@ class DashboardBrowserCheck(BrowserCheck):
         self.click_visible('[data-view=diagnostics]')
         self.dom("document.querySelector('#diagnostic-orca summary').textContent.includes('Недоступно')",
                  'Orca outage visible in diagnostics')
+        self.click_visible('#diagnostic-waits summary')
+        self.dom("""['Начало', 'Длительность', 'Orca не подтвердила состояние координатора', 'Записи совпадают']
+                 .every(text => document.querySelector('#diagnostic-waits').innerText.includes(text))""",
+                 'Sustained coordinator incident shows timing, reason and diagnostic result')
         self.click_visible('[data-view=graph]')
         self.dom("!!document.querySelector('#graph-view [data-node=planner][data-agent-state=unconfirmed]')",
                  'Working state becomes unconfirmed during outage')

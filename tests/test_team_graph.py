@@ -102,6 +102,9 @@ class GraphExecution(unittest.TestCase):
         atomic_json(attempt / 'config.json', cfg or small_graph())
         task = self.a.launcher.orca('orchestration','task-create','--run','root-run','--task-title','root','--spec','root')['task']['id']
         root = self.a.launcher.launch(attempt,'coordinator',task,'root-run','root',self.a.state_dir)
+        state = self.a.load_state()
+        state['current']['dispatch_id'] = root['dispatch_id']
+        self.a.save_state(state)
         return attempt, root
 
     def delegate(self, attempt, parent, ident='implement', request=None, **kwargs):
@@ -257,28 +260,95 @@ class GraphExecution(unittest.TestCase):
         self.assertFalse(self.a.launcher.registry(attempt)['fenced'])
         self.assertEqual(len(self.a.launcher.orca.workers),2)
 
+    def test_resume_settles_persisted_reports_child_first(self):
+        attempt, root = self.prepare()
+        _, parent = self.delegate(attempt, root)
+        _, child = self.delegate(attempt, parent, 'check')
+        path = self.a.launcher.orca.root / 'transport.json'
+        transport = read_json(path)
+        for worker in (parent, child):
+            transport['workers'][worker['dispatch_id']]['done'] = True
+        atomic_json(path, transport)
+        state = self.a.load_state()
+        self.assertEqual(parent['run_id'], child['run_id'])
+        receipt = {'messages': [{'id': str(uuid.uuid4()), 'type': 'worker_done',
+            'payload': {'dispatchId': worker['dispatch_id'], 'outcome': 'failed'}}
+            for worker in (parent, child)]}
+        def checkpoint(stage):
+            if stage == 'message:after_save':
+                raise SystemExit(86)
+
+        with patch('team_runner.runner_operations.checkpoint', side_effect=checkpoint), self.assertRaises(SystemExit):
+            self.a.persist_messages(state, receipt, child['run_id'])
+        self.assertTrue(all(c['status'] == 'running' for c in self.a.launcher.registry(attempt)['graph_calls']))
+        with patch.object(self.a.launcher, 'release_agent', wraps=self.a.launcher.release_agent) as release:
+            self.a.recover(self.a.load_state())
+            self.assertEqual([entry.args[0]['id'] for entry in release.call_args_list], [child['id'], parent['id']])
+        self.assertEqual([c['result']['outcome'] for c in self.a.launcher.registry(attempt)['graph_calls']],
+                         ['failed', 'failed'])
+
+    def test_foreign_or_conflicting_report_cannot_settle_call(self):
+        attempt, root = self.prepare()
+        _, child = self.delegate(attempt, root)
+        state = self.a.load_state()
+        report = {'id': 'foreign', 'type': 'worker_done',
+                  'payload': {'dispatchId': child['dispatch_id'], 'outcome': 'succeeded'}}
+        with patch.object(self.a.launcher, 'release_agent') as release:
+            self.a.persist_messages(state, {'messages': [report]}, 'foreign-run')
+            self.assertTrue(self.a.launcher.registry(attempt)['fenced'])
+            state['current']['messages'] = []
+            self.a.persist_messages(state, {'messages': [
+                dict(report, id='success'),
+                dict(report, id='failure', payload=dict(report['payload'], outcome='failed'))]}, child['run_id'])
+            self.a.recover(self.a.load_state())
+            release.assert_not_called()
+        registry = self.a.launcher.registry(attempt)
+        self.assertTrue(registry['fenced'])
+        self.assertEqual(registry['graph_calls'][0]['status'], 'running')
+
     def test_crash_after_child_close_settles_after_restart_without_replay(self):
-        attempt,root = self.prepare()
-        call,child = self.delegate(attempt,root)
-        original = self.a.launcher.release_agent
-        class PowerLoss(BaseException):pass
-        def close_then_crash(*args,**kwargs):
-            original(*args,**kwargs)
-            raise PowerLoss()
-        with patch.object(self.a.launcher,'release_agent',side_effect=close_then_crash):
-            with self.assertRaises(PowerLoss):self.finish(attempt,child)
-        self.assertEqual(self.a.launcher.registry(attempt)['graph_calls'][0]['status'],'settling')
+        attempt, root = self.prepare()
+        _, child = self.delegate(attempt, root)
+
+        def checkpoint(stage):
+            if stage == 'close:after_receipt':
+                raise SystemExit(86)
+
+        with patch('team_runner.runner_operations.checkpoint', side_effect=checkpoint), self.assertRaises(SystemExit):
+            self.finish(attempt, child)
+        journal = self.a.launcher.journal(attempt)
+        close_key = child['id'] + '-close'
+        self.assertEqual(read_json(journal)[close_key]['stage'], 'receipt')
+        self.assertEqual(self.a.launcher.registry(attempt)['graph_calls'][0]['status'], 'settling')
         from team_runner.engine import Runner
         old = self.a
-        self.a = Runner(old.context);self.a.launcher.orca = old.launcher.orca
-        self.assertEqual(self.a.launcher.reconcile_attempt(attempt),[])
-        with patch.object(self.a.launcher,'effect',wraps=self.a.launcher.effect) as effect:
-            self.a.release_completed_children(attempt)
-            effect.assert_not_called()
+        self.a = Runner(old.context)
+        self.a.launcher.orca = old.launcher.orca
+        with patch.object(self.a.launcher, 'release_agent') as release:
+            self.assertEqual(self.a.settle_graph_reports(attempt), [])
+            self.assertEqual(self.a.settle_graph_reports(attempt), [])
+            release.assert_not_called()
+        self.assertEqual(read_json(journal)[close_key]['stage'], 'close_verified')
         reg = self.a.launcher.registry(attempt)
-        self.assertEqual(reg['graph_calls'][0]['status'],'completed')
-        self.assertEqual(next(a for a in reg['agents'] if a['id']==root['id'])['status'],'active')
+        self.assertEqual(reg['graph_calls'][0]['status'], 'completed')
+        self.assertEqual(next(a for a in reg['agents'] if a['id'] == root['id'])['status'], 'active')
 
+    def test_interrupted_close_without_receipt_keeps_call_blocked(self):
+        attempt, root = self.prepare()
+        _, child = self.delegate(attempt, root)
+
+        def checkpoint(stage):
+            if stage == 'close:after_effect':
+                raise SystemExit(86)
+
+        with patch('team_runner.runner_operations.checkpoint', side_effect=checkpoint), self.assertRaises(SystemExit):
+            self.finish(attempt, child)
+        with patch.object(self.a.launcher, 'release_agent') as release:
+            self.assertTrue(self.a.settle_graph_reports(attempt))
+            release.assert_not_called()
+        reg = self.a.launcher.registry(attempt)
+        self.assertTrue(reg['fenced'])
+        self.assertEqual(reg['graph_calls'][0]['status'], 'settling')
 
     def test_stop_during_startup_prevents_dispatch_and_epoch_resume(self):
         from team_runner import goal_intent

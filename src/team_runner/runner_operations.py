@@ -23,7 +23,50 @@ def rejected_reply(op):
     receipt = op.get('failure_receipt') or {}
     return (op.get('args', [])[:2] == ['orchestration', 'reply']
             and receipt.get('ok') is False
-            and (receipt.get('error') or {}).get('code') == 'dispatch_inactive')
+            # Orca validates the caller's stable pane before entering the
+            # reply handler, so this refusal cannot have sent an answer.
+            and (receipt.get('error') or {}).get('code') in ('dispatch_inactive', 'stable_pane_required'))
+
+
+def inactive_reply(op):
+    return rejected_reply(op) and op['failure_receipt']['error']['code'] == 'dispatch_inactive'
+
+
+def reply_entries(journal, base):
+    return [(key, op) for key, op in journal.items() if key == base or (
+        (op.get('evidence') or {}).get('reply_base') == base
+        and key == f"{base}:{op['evidence'].get('command_id')}")]
+
+
+def same_reply_scope(recorded, current):
+    # Pausing changes the policy epoch without replacing the execution or its Run.
+    return all(recorded.get(key) == current.get(key) for key in ('generation', 'attempt', 'goal', 'run_id'))
+
+
+def reply_operation(journal, base, args, command_id, scope):
+    entries = reply_entries(journal, base)
+    for key, op in entries:
+        evidence = op.get('evidence') or {}
+        if command_id and evidence.get('command_id') == command_id:
+            if evidence.get('scope') != scope or op['args'] != args:
+                raise ValueError('reply command identity changed')
+            if op['status'] not in ('completed', 'rejected'):
+                raise UncertainOperation('reply unconfirmed; reconcile first')
+            return key, op, None
+    for _, op in entries:
+        if not same_reply_scope((op.get('evidence') or {}).get('scope', scope), scope):
+            raise ValueError('reply receipt belongs to a previous execution')
+        if op['status'] not in ('completed', 'rejected'):
+            raise ValueError('previous reply unconfirmed; reconcile first')
+    if not entries:
+        return base, None, None
+    for key, op in entries:
+        if op['status'] == 'completed' or inactive_reply(op):
+            return key, op, None
+    key, op = entries[-1]
+    if not command_id or not rejected_reply(op):
+        return key, op, None
+    return f'{base}:{command_id}', None, key
 
 
 def checkpoint(stage):
@@ -107,7 +150,7 @@ def rejected_dispatch(op):
             ('consumer_fenced', 'task_not_startable'))
 
 
-def reconcile(path, call):
+def reconcile(path, call, *, reply_mailboxes=None):
     """Read-only at Orca; absence never proves a mutation did not happen."""
     path = Path(path)
     journal = read_json(path, {})
@@ -128,7 +171,12 @@ def reconcile(path, call):
             if op['args'][0] == 'terminal':
                 result = terminal_evidence(op, call)
             else:
-                receipt = call('orchestration', 'request-show', '--request', op['request_id'], mailbox=op.get('mailbox'))
+                mailbox = op.get('mailbox')
+                args = op['args']
+                if (reply_mailboxes and args[:2] == ['orchestration', 'reply']
+                        and len(args) == 8 and args[6] == '--run'):
+                    mailbox = reply_mailboxes.get(args[7]) or mailbox
+                receipt = call('orchestration', 'request-show', '--request', op['request_id'], mailbox=mailbox)
                 if receipt.get('state') != 'completed' or not isinstance(receipt.get('receipt'), dict):
                     raise UncertainOperation(f"request {op['request_id']} = {receipt.get('state', 'unknown')}")
                 if receipt['receipt'].get('ok') is False:
@@ -207,7 +255,7 @@ def _verify_close(path, key, op, call):
             atomic_json(path, journal)
 
 
-def close_terminal(path, key, call, handle, incarnation, worktree_id, *, mailbox=None):
+def close_terminal(path, key, call, handle, incarnation, worktree_id, *, mailbox=None, allow_absent=False):
     """Close one journal-owned local terminal and verify the acknowledged process stop."""
     journal = read_json(path, {})
     if key in journal and (journal[key].get('evidence') or {}).get('launch'):
@@ -251,6 +299,10 @@ def close_terminal(path, key, call, handle, incarnation, worktree_id, *, mailbox
     except (RuntimeError, OSError, subprocess.TimeoutExpired):
         observed = None
     if not observed:
+        if allow_absent:
+            proof = missing_terminal_evidence(launch, call, worktree_id)
+            if proof:
+                return proof
         raise UncertainOperation('registered terminal unavailable before close')
     if any(observed.get(k) != terminal[k] for k in ('handle', 'incarnationId', 'ptyId', 'worktreeId')):
         raise RuntimeError('registered terminal identity changed; refusing close')

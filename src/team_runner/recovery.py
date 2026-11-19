@@ -8,6 +8,7 @@ import time
 import uuid
 
 from . import memory_admission
+from .orca import OrcaJSONError
 from .runner_store import atomic_json, enqueue, lock, read_json, running
 
 DELAYS = (2, 5, 15, 30, 60, 120)
@@ -79,6 +80,107 @@ def recovery_view(runner):
 def target(st):
     cur = st.get('current') or {}
     return cur.get('attempt_dir') or cur.get('dispatch_id') or cur.get('item')
+
+
+LIVENESS_THRESHOLD = 60
+
+
+def liveness_scope(state):
+    cur = state.get('current') or {}
+    if cur.get('attempt_dir') and cur.get('dispatch_id'):
+        return {'attempt': cur['attempt_dir'], 'dispatch': cur['dispatch_id']}
+    return None
+
+
+def liveness_incident(runner, state, *, now=None):
+    incident = read_json(runner.state_dir / 'liveness-incident.json', {})
+    if incident.get('scope') != liveness_scope(state) or not incident.get('visible'):
+        return None
+    elapsed = max(0, (time.time() if now is None else now) - incident['started_at'])
+    return {**incident, 'duration_seconds': int(elapsed)}
+
+
+def observe_liveness(runner, state, verdict, *, now=None, permitted=None):
+    """Called by the runner owner upon each coordinator observation."""
+    scope = liveness_scope(state)
+    path = runner.state_dir / 'liveness-incident.json'
+    incident = read_json(path, {})
+    if verdict != 'unverifiable' or not scope:
+        if incident:
+            path.unlink(missing_ok=True)
+        return
+    now = time.time() if now is None else now
+    if incident.get('scope') != scope:
+        incident = {'scope': scope, 'started_at': now, 'visible': False,
+                    'reason': 'Orca не подтвердила состояние координатора', 'diagnosis': None}
+        atomic_json(path, incident)
+    if now - incident['started_at'] < LIVENESS_THRESHOLD:
+        return
+    if not incident['visible']:
+        incident['visible'] = True
+        atomic_json(path, incident)
+    policy = settings(runner)
+    if (incident['diagnosis'] is not None or not policy['enabled'] or policy['intent'] != 'running'
+            or (permitted is not None and not permitted())
+            or state.get('paused') or state.get('stop_requested')
+            or liveness_scope(runner.load_state()) != scope):
+        return
+    # Reserve this observation before I/O so a crash cannot repeat the sweep.
+    incident['diagnosis'] = {'status': 'interrupted'}
+    atomic_json(path, incident)
+    try:
+        incident['diagnosis'] = diagnose_liveness(runner, state, scope)
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        incident['diagnosis'] = {'status': 'unavailable', 'reason': (
+            str(exc) if isinstance(exc, (json.JSONDecodeError, OrcaJSONError)) else 'Не удалось проверить записи запуска или доступность Orca')}
+    atomic_json(path, incident)
+
+
+def diagnose_liveness(runner, state, scope):
+    launcher = runner.launcher
+    attempt, dispatch_id = scope['attempt'], scope['dispatch']
+    launcher.context.check_attempt(attempt)
+    records = [a for a in launcher.registry(attempt)['agents']
+               if a.get('role') == 'coordinator' and a.get('dispatch_id') == dispatch_id
+               and a.get('attempt') == attempt and not a.get('superseded_by')]
+    if len(records) != 1:
+        return {'status': 'unconfirmed', 'reason': 'Координатор отсутствует в реестре попытки'}
+    agent = records[0]
+    journal = read_json(launcher.journal(attempt), {})
+    dispatch_op = journal.get(agent['id'] + '-dispatch', {})
+    launch = (dispatch_op.get('status') == 'completed'
+              and (dispatch_op.get('result') or {}).get('dispatchId') == dispatch_id
+              and dispatch_op.get('args', [])[:8] == ['orchestration', 'worker-start', '--task', agent.get('task_id'),
+                                                        '--run', agent.get('run_id'), '--terminal', agent.get('terminal')])
+    identity = {'handle': agent.get('terminal'), 'incarnationId': agent.get('incarnation'),
+                'worktreeId': launcher.context.orca_id}
+    def matches(terminal):
+        return bool(terminal) and all(value and terminal.get(key) == value for key, value in identity.items())
+    terminals = [t for op in journal.values() if op.get('status') == 'completed'
+                 and op.get('args', [])[:2] == ['terminal', 'create']
+                 and matches(t := (op.get('result') or {}).get('terminal'))]
+    owned = len(terminals) == 1 and bool(terminals[0].get('ptyId'))
+    mailbox = state.get('mailbox') if state.get('run_id') == agent.get('run_id') else agent.get('mailbox')
+
+    def read(*args):
+        try:
+            return launcher.orca(*args, mailbox=mailbox, timeout=2)
+        except OrcaJSONError:
+            raise
+        except (RuntimeError, OSError, subprocess.TimeoutExpired):
+            return None
+
+    worker = read('orchestration', 'worker-show', '--dispatch', dispatch_id)
+    dispatch = (worker or {}).get('dispatch') or {}
+    dispatch_matches = (dispatch.get('id') == dispatch_id and dispatch.get('runId') == agent.get('run_id')
+                        and dispatch.get('taskId') == agent.get('task_id')
+                        and ((worker or {}).get('terminalResource') or {}).get('ownerDispatchId') == dispatch_id)
+    pane = read('terminal', 'show', '--terminal', identity['handle']) if identity['handle'] else None
+    terminal = (pane or {}).get('terminal') or {}
+    terminal_matches = owned and matches(terminal) and terminal.get('ptyId') == terminals[0]['ptyId']
+    checks = {'dispatch_receipt': launch, 'terminal_receipt': owned,
+              'orca_dispatch': dispatch_matches, 'orca_terminal': terminal_matches}
+    return {'status': 'matched' if all(checks.values()) else 'unconfirmed', 'checks': checks}
 
 
 def _unknown(runner, st):
@@ -389,6 +491,7 @@ class Supervisor:
                         reports = runner.accepted_child_reports(cur['attempt_dir']) if cur.get('attempt_dir') else {}
                         accepted = reports.get(cur.get('dispatch_id'))
                         verdict = runner.launcher.liveness(cur['dispatch_id'], st.get('mailbox')) if cur.get('dispatch_id') else None
+                        observe_liveness(runner, st, verdict, now=self.clock(), permitted=permitted)
                         if verdict not in ('live', 'exited') and cur.get('attempt_dir'):
                             registry = runner.launcher.registry(cur['attempt_dir'])
                             agents = registry.get('agents', []) if isinstance(registry, dict) else []

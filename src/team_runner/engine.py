@@ -65,8 +65,9 @@ class Runner:
         print("\a", end="", flush=True)
 
 
-    def effect(self, st, key, *args, mailbox=None):
-        return operations.mutation(self.state_dir / 'operations.json', key, self.orca, *args, mailbox=mailbox or st.get('mailbox'))
+    def effect(self, st, key, *args, mailbox=None, evidence=None):
+        return operations.mutation(self.state_dir / 'operations.json', key, self.orca, *args,
+                                   mailbox=mailbox or st.get('mailbox'), evidence=evidence)
 
 
     def git(self, *args):
@@ -74,9 +75,7 @@ class Runner:
 
 
     def load_state(self):
-        if self.state_file.exists():
-            return json.loads(self.state_file.read_text())
-        return {"history": []}
+        return read_json(self.state_file, {"history": []})
 
 
     def save_state(self, st):
@@ -359,6 +358,14 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                     terminal = self.recover_mailbox(st)
             if terminal.get('incarnationId') != st.get('mailbox_incarnation') or terminal.get('worktreeId') != self.context.orca_id:
                 raise ValueError('runner mailbox identity changed')
+            if (terminal.get('handle') == mailbox and st.get('run_id') and terminal.get('orphaned')
+                    and terminal.get('connected') is False and terminal.get('writable') is False):
+                journal = read_json(self.launcher.journal(st['mailbox_dir']), {})
+                launch = next((op for op in journal.values() if all(
+                    ((op.get('result') or {}).get('terminal') or {}).get(key) == terminal.get(key)
+                    for key in ('handle', 'incarnationId', 'ptyId', 'worktreeId'))), {})
+                if operations.missing_terminal_evidence(launch, self.launcher.orca, self.context.orca_id):
+                    self.recover_mailbox(st)
         else:
             st.setdefault('session_id', str(uuid.uuid4()))
             st['mailbox_dir'] = str(self.state_dir / 'mailboxes' / st['session_id'])
@@ -457,7 +464,7 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                          'Fresh child sessions; no --reuse or --keep-session.\nRoot instructions:\n' +
                          node(frozen, frozen['root'])['instructions'])
             spec += "\nRead $TEAM_RUNNER_ATTEMPT/config.json before work. It is the authoritative role snapshot, including on retries."
-        if not cur.get("task_id") and cur.get("attempt", 1) > 1:
+        if not cur.get("task_id") and (cur.get("attempt", 1) > 1 or cur.get('attempt_reset')):
             spec += (f"\nЭто ПОПЫТКА {cur['attempt']}: прошлый координатор ({cur.get('previous_dispatch')}) прервался. "
                      "Обязательно выполни шаг 2 (продолжение прошлой попытки).\n")
             title += f" (attempt {cur['attempt']})"
@@ -536,6 +543,7 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
 
     def wait_coordinator(self, st):
         cur = st["current"]
+        self.settle_graph_reports(cur.get('attempt_dir'))
         for m in cur.get("messages", []):
             payload = m.get("payload") or {}
             if isinstance(payload, str):
@@ -543,7 +551,7 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             if m.get("type") == "worker_done" and payload.get("dispatchId") == cur["dispatch_id"]:
                 self.check_open_graph_calls(cur, payload.get('outcome') == 'succeeded')
                 return {"outcome": payload.get("outcome", "unknown"), "body": m.get("body", "")}
-        last_liveness_check = 0.0
+        last_liveness_check = float('-inf')
         while True:
             self.process_controls(st)
             from .autonomy import tick as autonomy_tick
@@ -574,10 +582,12 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             self.persist_messages(st, res, st["run_id"])
 
             msgs = res.get("messages") or []
-            if not msgs:
-                if time.monotonic() - last_liveness_check >= 15:
-                    last_liveness_check = time.monotonic()
-                    lv = self.launcher.liveness(cur["dispatch_id"], st.get("mailbox"))
+            if time.monotonic() - last_liveness_check >= 15:
+                last_liveness_check = time.monotonic()
+                lv = self.launcher.liveness(cur["dispatch_id"], st.get("mailbox"))
+                from .recovery import observe_liveness
+                observe_liveness(self, st, lv)
+                if not msgs:
                     self.log(f"{cur['item']}: ожидание, координатор {lv}")
                     registry = self.launcher.registry(cur['attempt_dir']) if cur.get('attempt_dir') else {}
                     waiting = any(a.get('dispatch_id') == cur['dispatch_id'] and a.get('status') == 'waiting_child'
@@ -585,6 +595,7 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                     if lv == "exited" and not waiting:
                         self.notify("координатор завершился без worker_done", f"{cur['item']}: team-runner retry")
                         return None
+            if not msgs:
                 continue
             done = None
             from .event_scope import classify
@@ -878,6 +889,10 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         elif args.cmd == "retry":
             data = {"force": args.force, "refresh": args.refresh,
                     "allow_extra_attempt": getattr(args, "allow_extra_attempt", False)}
+            if getattr(args, 'reset_attempts', False):
+                data['reset_attempts'] = True
+            if getattr(args, 'reset_reason', None) is not None:
+                data['reset_reason'] = args.reset_reason
             if getattr(args, 'refresh_context', False):
                 data['refresh_context'] = True
         from .application import submit_command
@@ -906,6 +921,9 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                     return old
                 if old:
                     raise ValueError('request_id already used for another command')
+        if action == 'retry':
+            from .application import _control_payload
+            _control_payload(action, {k: v for k, v in data.items() if k != '_target'})
         if action in ('pause', 'stop', 'retry'):
             from .recovery import set_intent
             set_intent(self, {'pause': 'paused', 'stop': 'stopped', 'retry': 'paused'}[action])
@@ -1005,6 +1023,8 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         operations.checkpoint('message:before_save')
         self.save_state(st)  # Always persist before ack; replay deduplicates by message ID.
         operations.checkpoint('message:after_save')
+        if not st.get('stop_requested') and any(m.get('type') == 'worker_done' for m in receipt.get('messages') or []):
+            self.settle_graph_reports(cur.get('attempt_dir'))
         from .coordinator_events import capture
         capture(self, st)
 
@@ -1065,13 +1085,16 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 self.ack_delivery(st, receipt['deliveryId'], run['run_id'], run['mailbox'])
 
 
-    def accepted_child_reports(self, attempt):
+    def accepted_child_reports(self, attempt, conflicts=None):
         cur = self.load_state().get('current') or {}
         if cur.get('attempt_dir') != str(attempt):
             return {}
         reports = {}
-        registered = {(a.get('run_id'), a.get('dispatch_id')) for a in self.launcher.registry(attempt)['agents']
-                      if not a.get('superseded_by')}
+        conflicts = set() if conflicts is None else conflicts
+        agents = [a for a in self.launcher.registry(attempt)['agents']
+                  if a.get('dispatch_id') and not a.get('superseded_by')]
+        registered = {(a.get('run_id'), a['dispatch_id']) for a in agents if a.get('run_id') or not a.get('call_id')}
+        graph_dispatches = {a['dispatch_id'] for a in agents if a.get('call_id')}
         for message in cur.get('messages', []):
             if message.get('type') == 'worker_done':
                 payload = message.get('payload') or {}
@@ -1080,53 +1103,55 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                         payload = json.loads(payload)
                     except ValueError:
                         continue
-                if isinstance(payload, dict) and (message.get('run_id'), payload.get('dispatchId')) in registered:
-                    reports[payload.get('dispatchId')] = payload
-        return reports
+                if not isinstance(payload, dict):
+                    continue
+                dispatch = payload.get('dispatchId')
+                if not isinstance(dispatch, str):
+                    continue
+                if (message.get('run_id'), dispatch) in registered:
+                    if dispatch in reports and reports[dispatch] != payload:
+                        conflicts.add(dispatch)
+                    reports[dispatch] = payload
+                elif dispatch in graph_dispatches:
+                    conflicts.add(dispatch)
+        return {dispatch: report for dispatch, report in reports.items() if dispatch not in conflicts}
+
+    def settle_graph_reports(self, attempt, *, permitted=None, probe_unreported=False):
+        if not attempt:
+            return []
+        from .graph_dispatch import settle_reports
+        with lock(Path(attempt) / 'agents.lock'):
+            reg = self.launcher.registry(attempt)
+            if not reg.get('graph_calls'):
+                return []
+            st = self.load_state()
+            cur = st.get('current') or {}
+            if cur.get('attempt_dir') != str(attempt) or st.get('stop_requested'):
+                return []
+            conflicts = set()
+            reports = self.accepted_child_reports(attempt, conflicts)
+            return settle_reports(self.launcher, attempt, reg, cur.get('dispatch_id'), reports, conflicts,
+                                  permitted=permitted, probe_unreported=probe_unreported)
 
     def release_completed_children(self, attempt):
+        self.settle_graph_reports(attempt, probe_unreported=True)
         reports = self.accepted_child_reports(attempt)
         with lock(Path(attempt) / 'agents.lock'):
             reg = self.launcher.registry(attempt)
             for agent in reg['agents']:
-                recover_call = agent.get('call_id') and agent.get('status') == 'released' and any(
-                    c['id'] == agent['call_id'] and c['status'] not in ('completed', 'stopped')
-                    for c in reg.get('graph_calls', []))
-                if agent['role'] == 'coordinator' or (agent.get('status') != 'active' and not recover_call) or agent.get('keep_session'):
+                if (agent['role'] == 'coordinator' or agent.get('call_id')
+                        or agent.get('status') != 'active' or agent.get('keep_session')):
                     continue
                 report = reports.get(agent['dispatch_id'])
-                try:
-                    data = self.launcher.observe_agent(agent) if not recover_call else {'dispatch': {'status': 'completed'}}
-                    status = (data.get('dispatch') or {}).get('status')
-                    known_failure = status == 'failed' and report and report.get('outcome') == 'failed'
-                    if agent.get('call_id') and (
-                            data.get('worker', {}).get('state') == 'outcome_unknown'
-                            or status not in ('dispatched', 'completed') and not known_failure
-                            or data.get('worker', {}).get('state') == 'failed' and not known_failure
-                            or not report and data.get('observation', {}).get('status') == 'exited'):
-                        raise RuntimeError('child outcome unknown or worker exited without accepted worker_done')
-                except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
-                    if not agent.get('call_id'):
-                        raise
-                    agent.update(status='unknown', error=str(exc))
-                    reg['fenced'] = True
-                    reg.setdefault('recovery_issues', []).append(str(exc))
-                    self.launcher.save_registry(attempt, reg)
-                    continue
+                data = self.launcher.observe_agent(agent)
+                status = (data.get('dispatch') or {}).get('status')
                 if not report or (status != 'completed' and not (status == 'failed' and report.get('outcome') == 'failed')):
                     continue
-                # Завершение проверено в Orca; журнал сообщений уже сохранён до закрытия.
                 try:
-                    if agent.get('call_id'):
-                        from .graph_dispatch import settle
-                        settle(self.launcher, attempt, reg, agent, report)
-                    else:
-                        self.launcher.release_agent(agent, attempt, report)
+                    self.launcher.release_agent(agent, attempt, report)
                     agent.pop('cleanup_error', None)
                 except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
                     agent['cleanup_error'] = str(exc)
-                    if agent.get('call_id'):
-                        reg['fenced'] = True
                     self.launcher.save_registry(attempt, reg)
                     raise
                 self.launcher.save_registry(attempt, reg)
@@ -1168,15 +1193,16 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         attempt = cur.get('attempt_dir')
         if not attempt:
             return
+        issues = self.settle_graph_reports(attempt, permitted=permitted)
+        if issues:
+            raise RuntimeError('; '.join(issues))
         reports = self.accepted_child_reports(attempt)
         with lock(Path(attempt) / 'agents.lock'):
             reg = self.launcher.registry(attempt)
             for agent in reg['agents']:
                 report = reports.get(agent.get('dispatch_id'))
-                recover_call = agent.get('call_id') and agent.get('status') == 'released' and any(
-                    c['id'] == agent['call_id'] and c['status'] not in ('completed', 'stopped')
-                    for c in reg.get('graph_calls', []))
-                if not report or agent.get('keep_session') or (agent.get('status') in ('released', 'stopped', 'superseded') and not recover_call):
+                if (not report or agent.get('call_id') or agent.get('keep_session')
+                        or agent.get('status') in ('released', 'stopped', 'superseded')):
                     continue
                 # Successful coordinators explicitly retain their session for acceptance corrections.
                 if agent.get('role') == 'coordinator' and report.get('outcome') == 'succeeded':
@@ -1184,17 +1210,11 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 if permitted is not None and not permitted():
                     raise RuntimeError('cleanup cancelled by user intent')
                 try:
-                    if agent.get('call_id'):
-                        from .graph_dispatch import settle
-                        settle(self.launcher, attempt, reg, agent, report)
-                    else:
-                        self.launcher.release_agent(agent, attempt, report)
+                    self.launcher.release_agent(agent, attempt, report)
                     agent.pop('error', None)
                     agent.pop('cleanup_error', None)
                 except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
                     agent['cleanup_error'] = str(exc)
-                    if agent.get('call_id'):
-                        reg['fenced'] = True
                     self.launcher.save_registry(attempt, reg)
                     raise
                 self.launcher.save_registry(attempt, reg)
@@ -1260,7 +1280,7 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                     continue
                 if agent.get('status') == 'stopped' and agent.get('terminal_closed'):
                     continue
-                if agent.get('dispatch_id') not in reports:
+                if agent.get('call_id') or agent.get('dispatch_id') not in reports:
                     agent['cleanup_error'] = 'worker_done missing; child cleanup unconfirmed'
                     self.launcher.save_registry(attempt, reg)
                     return False
@@ -1367,26 +1387,44 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             if len(matches) > 1:
                 raise ValueError('message ID ambiguous; specify run_id')
             message = next((m for m in cur.get('messages', []) if m['id'] == message_id and (not data.get('run_id') or m['run_id'] == data['run_id']) and m.get('type') == 'question'), None)
-            # Legacy state stores only question IDs.
-            if not message and message_id not in cur.get('questions', []):
+            # Legacy state stores only question IDs from the runner's Run.
+            if not message and (message_id not in cur.get('questions', [])
+                                or data.get('run_id', st.get('run_id')) != st.get('run_id')):
                 raise ValueError('unknown question')
             if message and message.get('answered'):
                 if resource and resource_wait.ready(self, st, data):
                     resource_wait.finish(st, data, command_id)
-                    self.save_state(st)
+                if command_id:
+                    st.setdefault('applied_commands', []).append(command_id)
+                self.save_state(st)
                 return
             if message and message.get('closed'):
                 raise ValueError(message.get('reply_error') or 'question is closed')
             run_id = message['run_id'] if message else st['run_id']
-            mailbox = None
-            if cur.get('attempt_dir'):
-                mailbox = next((r.get('mailbox') for r in self.launcher.registry(cur['attempt_dir'])['runs']
-                                if r.get('run_id') == run_id), None)
+            mailbox = st.get('mailbox') if run_id == st.get('run_id') else None
+            if not mailbox and cur.get('attempt_dir'):
+                mailbox = next((r['mailbox'] for r in self.launcher.registry(cur['attempt_dir'])['runs']
+                                if r.get('run_id') == run_id and r.get('mailbox')
+                                and r.get('status', 'ready') == 'ready'), None)
+            from .application import _execution_scope
+            journal = read_json(self.state_dir / 'operations.json', {})
+            base = f'reply:{run_id}:{message_id}'
+            scope = _execution_scope(self, st)
+            args = ['orchestration', 'reply', '--id', message_id, '--body', text, '--run', run_id]
+            key, previous, previous_key = operations.reply_operation(journal, base, args, command_id, scope)
+            if previous_key and not mailbox:
+                raise ValueError('current Run mailbox unavailable')
             with resource_wait.permission(self, data) if resource else nullcontext():
                 try:
-                    self.effect(st, 'reply:' + run_id + ':' + message_id, 'orchestration', 'reply', '--id', message_id, '--body', text, '--run', run_id, mailbox=mailbox)
+                    if previous and previous.get('status') == 'rejected':
+                        raise operations.RejectedOperation(previous.get('error') or 'reply rejected')
+                    if not previous or previous.get('status') != 'completed':
+                        self.effect(st, key, *args, mailbox=mailbox,
+                                    evidence={'command_id': command_id, 'scope': scope,
+                                              'reply_base': base, 'previous': previous_key})
                 except operations.RejectedOperation as exc:
-                    if message:
+                    recorded = read_json(self.state_dir / 'operations.json', {}).get(key, {})
+                    if message and operations.inactive_reply(recorded):
                         message.update(closed=True, reply_error=str(exc))
                     raise
                 if message:
@@ -1441,10 +1479,12 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 old_config = read_json(Path(cur['attempt_dir']) / 'config.json')
             else:
                 raise ValueError('legacy attempt has no ownership registry; retry requires manual reconciliation')
-            extra = cur.get('attempt', 1) >= 3
-            if extra and data.get('allow_extra_attempt') is not True:
+            previous_attempt = cur.get('attempt', 1)
+            extra = previous_attempt >= 3
+            reset = data.get('reset_attempts') is True
+            if extra and not reset and data.get('allow_extra_attempt') is not True:
                 raise ValueError('three failed attempts: explicitly authorize one extra attempt')
-            if extra:
+            if extra or reset:
                 from .recovery import _unknown
                 if st.get('control_uncertain') or st.get('recovery_issues') or _unknown(self, st):
                     raise ValueError('operation outcome unknown; reconcile before extra attempt')
@@ -1468,12 +1508,15 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                         {k: options.get(k) for k in config.FIELDS | {'fast'}}) if data.get('refresh') else old_config)
             st['options'] = options
             st['current'] = {k: cur[k] for k in ('item', 'start_head', 'dirty_before') if k in cur}
-            st['current'].update(attempt=cur.get('attempt', 1) + 1, previous_dispatch=cur.get('dispatch_id'),
+            st['current'].update(attempt=1 if reset else previous_attempt + 1, previous_dispatch=cur.get('dispatch_id'),
                                  gate_resolved=True, retry_config=snapshot,
                                  retry_context_from=None if data.get('refresh') or data.get('refresh_context') else cur['attempt_dir'],
                                  started_at=dt.datetime.now().isoformat(timespec='seconds'))
-            if extra:
-                st['current']['manual_retry'] = {'previous_attempt': cur.get('attempt', 1),
+            if reset:
+                st['current']['attempt_reset'] = {'previous_attempt': previous_attempt, 'command_id': command_id,
+                                                  'reason': data.get('reset_reason', 'unspecified')}
+            elif extra:
+                st['current']['manual_retry'] = {'previous_attempt': previous_attempt,
                                                'command_id': command_id}
             st.pop('stop_requested', None)
             st.pop('stop_status', None)
@@ -1487,6 +1530,60 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         operations.checkpoint('command:after_save')
 
 
+    def reconcile_reply(self, st, identifier, command, journal):
+        from .application import _execution_scope
+        if command.get('id') != identifier or command.get('action') != 'reply':
+            return False
+        scope = _execution_scope(self, st)
+        if 'schema_version' in command:
+            envelope = command.get('command') or {}
+            external = envelope.get('scope') or {}
+            guard = command.get('guard') or {}
+            if (envelope.get('request_id') != identifier or envelope.get('action') != 'reply'
+                    or external.get('identity') != self.context.identity()
+                    or not operations.same_reply_scope(guard, scope)
+                    or any(external.get(key) != scope[key] for key in ('generation', 'attempt'))):
+                return False
+            data = envelope.get('payload') or {}
+        else:
+            data = command.get('data') or {}
+            if data.get('_target', scope['attempt']) != scope['attempt']:
+                return False
+        cur = st.get('current') or {}
+        matches = [m for m in cur.get('messages', []) if m.get('type') == 'question'
+                   and m.get('id') == data.get('message_id')
+                   and (not data.get('run_id') or m.get('run_id') == data['run_id'])]
+        if len(matches) != 1:
+            return False
+        message = matches[0]
+        run_id, message_id = message['run_id'], message['id']
+        args = ['orchestration', 'reply', '--id', message_id, '--body', data.get('text'), '--run', run_id]
+        base = f'reply:{run_id}:{message_id}'
+        exact = [op for _, op in operations.reply_entries(journal, base)
+                 if (op.get('evidence') or {}).get('command_id') == identifier]
+        for op in exact:
+            recorded_scope = op['evidence'].get('scope') or {}
+            if (op.get('args') != args or not operations.same_reply_scope(recorded_scope, scope)
+                    or 'schema_version' in command and recorded_scope != command.get('guard')):
+                return False
+        if not exact:
+            legacy = journal.get(base, {})
+            if (legacy.get('args') == args and not (legacy.get('evidence') or {}).get('command_id')
+                    and operations.same_reply_scope((legacy.get('evidence') or {}).get('scope', scope), scope)):
+                exact = [legacy]
+        if len(exact) != 1:
+            return False
+        op = exact[0]
+        if op.get('status') == 'completed':
+            message['answered'] = True
+            if '_resource_wait' in data:
+                from . import resource_wait
+                resource_wait.finish(st, data, identifier)
+        elif op.get('status') != 'rejected' or not operations.rejected_reply(op):
+            return False
+        return True
+
+
     def recover(self, st, request_id=None, *, technical_only=False):
         cur = st.get('current') or {}
         paths = [self.state_dir / 'operations.json']
@@ -1498,7 +1595,12 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 raise ValueError('unknown operation ID in current attempt')
             if path == paths[0]:
                 operations.continue_operation(path, request_id, self.orca)
-        issues = operations.reconcile(paths[0], self.orca)
+        runs = self.launcher.registry(cur['attempt_dir'])['runs'] if cur.get('attempt_dir') else []
+        reply_mailboxes = {r['run_id']: r['mailbox'] for r in runs
+                           if r.get('status', 'ready') == 'ready' and r.get('run_id') and r.get('mailbox')}
+        if st.get('run_id') and st.get('mailbox'):
+            reply_mailboxes[st['run_id']] = st['mailbox']
+        issues = operations.reconcile(paths[0], self.orca, reply_mailboxes=reply_mailboxes)
         if st.get('mailbox_dir'):
             mailbox_journal = self.launcher.journal(st['mailbox_dir'])
             issues += operations.reconcile(mailbox_journal, self.orca)
@@ -1526,7 +1628,10 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             issues += self.launcher.reconcile_attempt(cur['attempt_dir'], request_id if request_id and path != paths[0] else None, **recovery_args)
             if not technical_only:
                 if not issues:
-                    self.cleanup_accepted_reports(st)
+                    try:
+                        self.cleanup_accepted_reports(st)
+                    except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+                        issues.append(str(exc))
                 child_problems, child_resource_problems = self.child_acceptance_problems(st)
                 cur['incomplete_checks'] = child_problems
                 issues += child_resource_problems
@@ -1539,26 +1644,34 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 cur.update(dispatch_id=coordinator['dispatch_id'], terminal=coordinator['terminal'])
         elif cur.get('dispatch_id'):
             issues.append('legacy attempt lacks ownership evidence; recovery blocked')
-        for op in read_json(paths[0], {}).values():
-            if op.get('status') != 'rejected' or not operations.rejected_reply(op):
+        journal = read_json(paths[0], {})
+        from .application import _execution_scope
+        scope = _execution_scope(self, st)
+        for op in journal.values():
+            if (op.get('status') != 'rejected' or not operations.inactive_reply(op)
+                    or not operations.same_reply_scope((op.get('evidence') or {}).get('scope', scope), scope)):
                 continue
             args = op['args']
             if '--id' not in args or '--run' not in args:
                 continue
             for message in cur.get('messages', []):
-                if (message.get('id') == args[args.index('--id') + 1]
+                if (message.get('type') == 'question' and not message.get('answered')
+                        and message.get('id') == args[args.index('--id') + 1]
                         and message.get('run_id') == args[args.index('--run') + 1]):
                     message.update(closed=True, reply_error=op.get('error') or 'Dispatch inactive')
         uncertain = st.get('control_uncertain')
         if uncertain:
             command_path = self.state_dir / 'commands' / (uncertain + '.json')
             command = read_json(command_path, {})
-            if 'schema_version' in command:
+            reply_proved = self.reconcile_reply(st, uncertain, command, journal)
+            if reply_proved:
+                st.pop('control_uncertain', None)
+                uncertain = None
+            elif 'schema_version' in command:
                 # A v1 terminal receipt is immutable. Reconciliation may clear the
-                # blocker from applied-state evidence, never rewrite/replay it.
+                # blocker from applied-state evidence.
+                envelope = command.get('command') or {}
                 if uncertain not in st.get('applied_commands', []) and not issues:
-                    from .application import _execution_scope
-                    envelope = command.get('command') or {}
                     # A reconcile has no unconfirmed command effect to replay:
                     # the successful observations above are its completion proof.
                     if (command.get('action') == envelope.get('action') == 'reconcile'
@@ -1599,21 +1712,6 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 else:
                     issues.append('versioned command lacks applied-state evidence; inspect effects')
                 uncertain = None
-            data = command.get('data') or {}
-            if 'schema_version' not in command and command.get('action') == 'reply':
-                rejected = next((op for op in read_json(paths[0], {}).values()
-                    if op.get('status') == 'rejected' and operations.rejected_reply(op)
-                    and '--id' in op['args'] and op['args'][op['args'].index('--id') + 1] == data.get('message_id')
-                    and '--run' in op['args'] and op['args'][op['args'].index('--run') + 1] == data.get('run_id')), None)
-                if rejected:
-                    error = rejected.get('error') or 'question closed: Dispatch inactive'
-                    command.update(status='error', error=error, result={'state': 'error', 'error': error})
-                    atomic_json(command_path, command)
-                    for message in cur.get('messages', []):
-                        if message.get('id') == data.get('message_id') and message.get('run_id') == data.get('run_id'):
-                            message.update(closed=True, reply_error=error)
-                    st.pop('control_uncertain', None)
-                    uncertain = None
         if uncertain and not issues:
             command_path = self.state_dir / 'commands' / (uncertain + '.json')
             command = read_json(command_path)
@@ -1640,13 +1738,13 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 # The stop intention is durable. Reconciliation never issues a new stop/close.
                 st.setdefault('applied_commands', []).append(uncertain)
                 command.update(status='done')
-            elif command and command['action'] in ('reply', 'resolve', 'resource-resume'):
+            elif command and command['action'] in ('resolve', 'resource-resume'):
                 data = command['data']
                 if command['action'] == 'resource-resume':
                     from .resource_wait import effect
                     key = effect(data)[0]
                 else:
-                    key = ('reply:' + next(m['run_id'] for m in cur['messages'] if m['id'] == data['message_id']) + ':' + data['message_id'] if command['action'] == 'reply' else 'resolve:' + cur['gate_id'])
+                    key = 'resolve:' + cur['gate_id']
                 recorded = read_json(paths[0], {}).get(key, {})
                 if recorded.get('status') == 'completed':
                     self.apply_control(st, command['action'], data, uncertain)  # cached receipt only

@@ -87,6 +87,7 @@ class Services(unittest.TestCase):
         self.assertEqual(cli(['service', 'reconcile', '--project', project])['result']['state'], 'stopped')
 
     def test_two_projects_isolation_and_manager_restart(self):
+        self.manager.timeout = 2
         for p in self.projects: self.assertEqual(self.action('start', p)['status'], 'done')
         a, b = [self.manager.status(p) for p in self.projects]
         self.assertNotEqual(a['port'], b['port'])

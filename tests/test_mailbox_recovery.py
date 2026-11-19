@@ -1,3 +1,4 @@
+import uuid
 from unittest.mock import patch
 from test_goal_runner import Fixture, runner, store
 
@@ -86,6 +87,29 @@ class MailboxRecovery(Fixture):
                 runner.ensure_run(self.state)
             create.assert_not_called()
 
+    def test_orphaned_mailbox_projection_requires_process_and_inventory_evidence(self):
+        old = {**self.fresh, 'handle': 'old', 'incarnationId': 'old-inc', 'ptyId': 'old-pty',
+               'orphaned': True, 'connected': False, 'writable': False}
+        journal = runner.launcher.journal(self.state['mailbox_dir'])
+        launch = {'args': ['terminal', 'create'], 'status': 'completed', 'result': {'terminal': old}}
+        store.atomic_json(journal, {'mailbox': launch})
+
+        def transport(*args, **kwargs):
+            if args == ('terminal', 'show', '--terminal', 'old'):
+                return {'terminal': old}
+            return self.transport(*args, **kwargs)
+
+        with patch.object(runner.launcher, 'orca', side_effect=transport), \
+                patch.object(runner.launcher, 'create_terminal', return_value=self.fresh) as create, \
+                patch.object(runner, 'effect', side_effect=self.bind), \
+                patch('team_runner.runner_operations.missing_terminal_evidence', side_effect=[None, {'terminal': old}]) as proof:
+            self.assertEqual(runner.ensure_run(self.state), 'parent')
+            create.assert_not_called()
+            self.assertEqual(runner.ensure_run(self.state), 'parent')
+            create.assert_called_once()
+        self.assertEqual(proof.call_args.args[0], launch)
+        self.assertEqual(self.state['mailbox'], 'new')
+
     def test_recorded_replacement_recovers_after_binding_before_state_save(self):
         self.owner = 'new'
         store.atomic_json(runner.launcher.journal(self.state['mailbox_dir']), {
@@ -95,3 +119,47 @@ class MailboxRecovery(Fixture):
                 patch.object(runner, 'effect', side_effect=self.bind):
             runner.ensure_run(self.state)
         self.assertEqual(self.state['mailbox'], 'new')
+
+    def test_confirmed_refusal_allows_new_command_after_mailbox_replacement(self):
+        self.state['current']['messages'] = [{'id': 'q', 'type': 'question', 'run_id': 'parent'}]
+        runner.save_state(self.state)
+        original_effect = runner.effect
+        sent = []
+
+        def transport(*args, **kwargs):
+            if args[:2] == ('orchestration', 'reply'):
+                sent.append((kwargs['mailbox'], args[-1]))
+                if kwargs['mailbox'] == 'old':
+                    exc = RuntimeError('stable pane required')
+                    exc.receipt = {'ok': False, 'error': {'code': 'stable_pane_required'}}
+                    raise exc
+                return {'message': {'id': 'answer'}}
+            return self.transport(*args, **kwargs)
+
+        def effect(st, key, *args, **kwargs):
+            if args[:2] == ('orchestration', 'run-use'):
+                return self.bind(st, key, *args, **kwargs)
+            return original_effect(st, key, *args, **kwargs)
+
+        first, second = str(uuid.uuid4()), str(uuid.uuid4())
+        data = {'message_id': 'q', 'run_id': 'parent', 'text': 'answer'}
+        with patch.object(runner.launcher, 'orca', side_effect=transport), \
+                patch.object(runner.launcher, 'create_terminal', return_value=self.fresh), \
+                patch.object(runner, 'effect', side_effect=effect):
+            refused = runner.submit_control('reply', data, first)
+            self.assertEqual(refused['status'], 'error')
+            self.assertFalse(runner.load_state()['current']['messages'][0].get('closed'))
+            runner.ensure_run(runner.load_state())
+            self.assertEqual(runner.submit_control('reply', data, first), refused)
+            accepted = runner.submit_control('reply', data, second)
+            self.assertEqual(accepted['status'], 'done')
+            self.assertEqual(runner.submit_control('reply', data, second), accepted)
+
+        original_key = 'reply:parent:q'
+        journal = store.read_json(runner.state_dir / 'operations.json')
+        self.assertEqual(journal[original_key]['status'], 'rejected')
+        retry = journal[original_key + ':' + second]
+        self.assertEqual(retry['evidence']['previous'], original_key)
+        self.assertEqual(sent, [('old', journal[original_key]['request_id']), ('new', retry['request_id'])])
+        self.assertNotEqual(sent[0][1], sent[1][1])
+        self.assertTrue(runner.load_state()['current']['messages'][0]['answered'])

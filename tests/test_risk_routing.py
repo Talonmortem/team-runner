@@ -92,7 +92,7 @@ class RiskRoles(Fixture):
     def test_dispatch_uses_snapshot_settings(self):
         attempt, _ = self.attempt()
         for role in ('tester_complex', 'final_reviewer', 'final_reviewer_critical', 'escalation_expert'):
-            with self.subTest(role=role), patch.object(launch, '_launch', side_effect=lambda a, r, rec, *x: rec):
+            with self.subTest(role=role), patch.object(launch, '_launch', side_effect=lambda a, r, rec, *args, **kwargs: rec):
                 rec = launch.launch(attempt, role, role, 'run', 'title', self.root)
                 self.assertEqual(rec['requested'], config.defaults()['roles'][role])
                 argv = launch.argv(rec['requested'], self.root)

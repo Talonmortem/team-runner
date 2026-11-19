@@ -29,12 +29,13 @@ class ReplyRejection(Fixture):
         st['current']['messages'] = [{'id': 'q', 'type': 'question', 'run_id': 'parent'}]
         launch.save_registry(attempt, {'agents': [{'role': 'coordinator', 'dispatch_id': 'owned',
                                                   'status': 'unknown'}], 'runs': []})
-        store.atomic_json(runner.state_dir / 'commands/command.json', {
-            'id': 'command', 'action': 'reply', 'status': 'unknown',
-            'data': {'message_id': 'q', 'run_id': 'parent', 'text': 'answer'}})
+        path = runner.state_dir / 'commands/command.json'
+        command = {'id': 'command', 'action': 'reply', 'status': 'unknown',
+                   'data': {'message_id': 'q', 'run_id': 'parent', 'text': 'answer'}}
+        store.atomic_json(path, command)
         store.atomic_json(runner.state_dir / 'operations.json', {'reply:parent:q': {
             'request_id': 'request', 'status': 'unknown', 'error': 'question closed',
-            'args': ['orchestration', 'reply', '--id', 'q', '--run', 'parent'],
+            'args': ['orchestration', 'reply', '--id', 'q', '--body', 'answer', '--run', 'parent'],
             'failure_receipt': {'ok': False, 'error': {'code': 'dispatch_inactive'}}}})
         with patch.object(runner, 'orca') as call, \
                 patch.object(launch, 'reconcile_attempt', return_value=['child cleanup required']):
@@ -42,7 +43,7 @@ class ReplyRejection(Fixture):
             call.assert_not_called()
         self.assertNotIn('control_uncertain', st)
         self.assertEqual(st['recovery_issues'], ['child cleanup required'])
-        self.assertEqual(store.read_json(runner.state_dir / 'commands/command.json')['status'], 'error')
+        self.assertEqual(store.read_json(path), command)
         self.assertTrue(st['current']['messages'][0]['closed'])
 
     def test_transport_failure_remains_unknown(self):
@@ -51,6 +52,57 @@ class ReplyRejection(Fixture):
             with self.assertRaises(operations.UncertainOperation):
                 operations.mutation(path, 'reply', runner.orca, 'orchestration', 'reply', '--id', 'q')
         self.assertEqual(store.read_json(path)['reply']['status'], 'unknown')
+
+    def test_versioned_reply_recovery_uses_preflight_refusal_without_replaying(self):
+        from team_runner.application import _execution_scope
+        _, st = self.attempt()
+        st['current']['messages'] = [{'id': 'q', 'type': 'question', 'run_id': 'parent'}]
+        st['control_uncertain'] = 'command'
+        guard = _execution_scope(runner, st)
+        path = runner.state_dir / 'commands/command.json'
+        command = {'schema_version': 1, 'id': 'command', 'action': 'reply', 'status': 'unknown',
+                   'guard': guard, 'command': {'request_id': 'command', 'action': 'reply',
+                   'scope': {**guard, 'identity': runner.context.identity()},
+                   'payload': {'message_id': 'q', 'run_id': 'parent', 'text': 'answer'}}}
+        store.atomic_json(path, command)
+        journal = runner.state_dir / 'operations.json'
+        op = {'request_id': 'original', 'status': 'unknown',
+              'args': ['orchestration', 'reply', '--id', 'q', '--body', 'other', '--run', 'parent'],
+              'failure_receipt': {'ok': False, 'error': {'code': 'stable_pane_required'}}}
+        store.atomic_json(journal, {'reply:parent:q': op})
+        with patch.object(runner, 'orca') as call, patch.object(launch, 'reconcile_attempt', return_value=[]):
+            runner.recover(st)
+            self.assertEqual(st['control_uncertain'], 'command')
+            op['args'][5] = 'answer'
+            store.atomic_json(journal, {'reply:parent:q': op})
+            runner.recover(st)
+            call.assert_not_called()
+        self.assertNotIn('control_uncertain', st)
+        self.assertEqual(store.read_json(path), command)
+        self.assertNotIn('answered', st['current']['messages'][0])
+        self.assertNotIn('closed', st['current']['messages'][0])
+
+    def test_completed_legacy_reply_updates_question_without_rewriting_receipt(self):
+        _, st = self.attempt()
+        st['current']['messages'] = [
+            {'id': 'q', 'type': 'question', 'run_id': run} for run in ('parent', 'another-run')]
+        st['control_uncertain'] = 'command'
+        path = runner.state_dir / 'commands/command.json'
+        record = {'id': 'command', 'action': 'reply', 'status': 'unknown',
+                  'data': {'message_id': 'q', 'run_id': 'parent', 'text': 'answer',
+                           '_target': st['current']['attempt_dir']}}
+        store.atomic_json(path, record)
+        store.atomic_json(runner.state_dir / 'operations.json', {'reply:parent:q': {
+            'request_id': 'legacy-request', 'status': 'completed',
+            'args': ['orchestration', 'reply', '--id', 'q', '--body', 'answer', '--run', 'parent'],
+            'result': {'message': {'id': 'delivered'}}}})
+        with patch.object(launch, 'reconcile_attempt', return_value=[]), patch.object(runner, 'orca') as call:
+            runner.recover(st, technical_only=True)
+        call.assert_not_called()
+        self.assertNotIn('control_uncertain', st)
+        self.assertTrue(st['current']['messages'][0]['answered'])
+        self.assertNotIn('answered', st['current']['messages'][1])
+        self.assertEqual(store.read_json(path), record)
 
     def test_lost_inactive_receipt_closes_question_as_history(self):
         _, st = self.attempt()

@@ -159,6 +159,10 @@ class LaunchTests(unittest.TestCase):
                     self.assertEqual(application.state_view(self.a)['health']['state'], 'waiting_memory')
                     summary = protocol.summary(self.a)
                     self.assertEqual(summary['observed_state'], 'waiting_memory')
+                    waiting = summary['waiting_memory']
+                    self.assertEqual(waiting['reason'], wait['reason'])
+                    self.assertEqual(waiting['metrics'], wait['metrics'])
+                    self.assertGreaterEqual(waiting['wait_seconds'], 0)
                     self.assertEqual(summary['available_actions'], [{'action': 'pause'}, {'action': 'stop'}])
                     self.assertEqual(self._transport(), before)
                     with lock(attempt / 'agents.lock', blocking=False), lock(self.a.state_dir / 'goal-intent.lock', blocking=False):

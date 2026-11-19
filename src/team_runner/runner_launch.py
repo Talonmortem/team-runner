@@ -920,6 +920,7 @@ class Launcher:
                         raise RuntimeError('mailbox creation unconfirmed')
                     self.close_mailbox(attempt, run)
                     run['status'] = 'closed'
+                    run.pop('error', None)
                 except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
                     run['error'] = str(exc)
                     confirmed = False
@@ -942,7 +943,7 @@ class Launcher:
     def close_mailbox(self, attempt, run):
         run['close_evidence'] = operations.close_terminal(
             self.journal(attempt), 'mailbox-close', self.orca, run['mailbox'], run.get('incarnation'),
-            self.context.orca_id)
+            self.context.orca_id, allow_absent=True)
 
 
     def reconcile_attempt(self, attempt, request_id=None, accepted_reports=None):

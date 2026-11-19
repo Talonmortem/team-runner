@@ -39,6 +39,66 @@ class Recovery(unittest.TestCase):
         self.supervisor.tick(self.runner)
         return read_json(self.path / 'recovery.json')
 
+    def test_unverifiable_threshold_and_diagnostics_once_per_dispatch(self):
+        attempt = self.state['current']['attempt_dir']
+        self.state.update(run_id='run', mailbox='mailbox')
+        pane = {'handle': 'pane', 'incarnationId': 'incarnation', 'worktreeId': 'work', 'ptyId': 'pty'}
+        self.runner.launcher.context.orca_id = 'work'
+        agent = {'id': 'agent', 'role': 'coordinator', 'attempt': attempt, 'dispatch_id': 'dispatch',
+                 'run_id': 'run', 'task_id': 'task', 'terminal': 'pane', 'incarnation': 'incarnation'}
+        self.runner.launcher.registry.return_value = {'agents': [agent], 'runs': []}
+        self.runner.launcher.orca.side_effect = [
+            {'dispatch': {'id': 'dispatch', 'runId': 'run', 'taskId': 'task'},
+             'terminalResource': {'ownerDispatchId': 'dispatch'}},
+            {'terminal': pane},
+        ]
+        atomic_json(Path(attempt) / 'operations.json', {
+            'agent-terminal': {'status': 'completed', 'args': ['terminal', 'create'], 'result': {'terminal': pane}},
+            'agent-dispatch': {'status': 'completed', 'result': {'dispatchId': 'dispatch'},
+                               'args': ['orchestration', 'worker-start', '--task', 'task',
+                                        '--run', 'run', '--terminal', 'pane']},
+        })
+
+        def observe(verdict):
+            recovery.observe_liveness(self.runner, self.state, verdict, now=self.now)
+            return recovery.liveness_incident(self.runner, self.state, now=self.now)
+
+        self.assertIsNone(observe('unverifiable'))
+        self.now += 59
+        self.assertIsNone(observe('unverifiable'))
+        self.runner.launcher.orca.assert_not_called()
+        self.now += 1
+        incident = observe('unverifiable')
+        self.assertEqual(incident['started_at'], 100)
+        self.assertEqual(incident['duration_seconds'], 60)
+        self.assertTrue(incident['reason'])
+        self.assertEqual(incident['diagnosis']['status'], 'matched')
+        self.assertEqual([(call.args[:2], call.kwargs) for call in self.runner.launcher.orca.call_args_list],
+                         [(('orchestration', 'worker-show'), {'mailbox': 'mailbox', 'timeout': 2}),
+                          (('terminal', 'show'), {'mailbox': 'mailbox', 'timeout': 2})])
+        self.now += 60
+        self.assertEqual(observe('unverifiable')['duration_seconds'], 120)
+        self.assertEqual(self.runner.launcher.orca.call_count, 2)
+        self.state['current']['dispatch_id'] = 'replacement'
+        self.assertIsNone(observe('unverifiable'))
+        self.now += 60
+        self.assertEqual(observe('unverifiable')['diagnosis']['status'], 'unconfirmed')
+        self.assertEqual(self.runner.launcher.orca.call_count, 2)
+        self.assertIsNone(observe('unknown'))
+        self.assertFalse((self.path / 'liveness-incident.json').exists())
+        self.runner.apply_control.assert_not_called()
+
+    def test_unverifiable_is_visible_even_when_recovery_disabled_or_paused(self):
+        for enabled, intent in ((False, 'running'), (True, 'paused')):
+            with self.subTest(enabled=enabled, intent=intent):
+                recovery.configure(self.runner, enabled)
+                recovery.set_intent(self.runner, intent)
+                recovery.observe_liveness(self.runner, self.state, 'live', now=100)
+                recovery.observe_liveness(self.runner, self.state, 'unverifiable', now=100)
+                recovery.observe_liveness(self.runner, self.state, 'unverifiable', now=160)
+                self.assertIsNone(recovery.liveness_incident(self.runner, self.state, now=160)['diagnosis'])
+                self.runner.launcher.orca.assert_not_called()
+
     def test_dead_owner_deferral_preserves_attempt_incident_and_check_budget(self):
         from team_runner.memory_admission import WaitingMemory
         self.runner.launcher.resume_ready_launches.side_effect = WaitingMemory({'reason': 'low_available_memory'})

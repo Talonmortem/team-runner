@@ -7,6 +7,7 @@
   "desired_state": "paused",
   "observed_state": "paused",
   "confirmed": true,
+  "waiting_memory": null,
   "current": {
     "item": null,
     "attempt": null
