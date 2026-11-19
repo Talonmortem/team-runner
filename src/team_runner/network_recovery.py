@@ -273,14 +273,6 @@ def _supervise(supervisor, runner, state):
                for s in journal['sessions'].values())
 
 
-def check_receipt(receipt, agent, request):
-    message = receipt.get('message') or {}
-    if (not message.get('id') or message.get('to_handle') != 'dispatch:' + agent['dispatch_id']
-            or message.get('run_id') != agent['run_id']
-            or receipt.get('mutation', {}).get('requestId') != request):
-        raise operations.UncertainOperation('network message acceptance receipt identity unconfirmed')
-
-
 def apply(runner, state, data, identifier):
     allowed = lambda: permitted(runner, runner.load_state(), data['scope'])
     with ExitStack() as admission:
@@ -329,7 +321,7 @@ def _apply(runner, state, data, identifier, *, release_admission):
                     'Continue the current task after the recorded network failure. Reconcile unfinished operations; '
                     'do not replay unknown effects or restart the item.', mailbox=agent.get('mailbox'))
             op = read_json(runner.launcher.journal(attempt))['network-' + identifier]
-            check_receipt(receipt, agent, op['request_id'])
+            operations.check_dispatch_message(receipt, agent, op['request_id'])
             session['receipt'] = receipt  # Queueing, starting and processing are separate facts.
         elif data['action'] == 'replace':
             replacement = replace_executor(runner, state, attempt, reg, agent, observed,
@@ -343,7 +335,7 @@ def _apply(runner, state, data, identifier, *, release_admission):
                     '--type', 'status', '--subject', 'Network replacement handoff', '--body', json.dumps(session['handoff']),
                     mailbox=replacement.get('mailbox'))
                 op = read_json(runner.launcher.journal(attempt))['network-handoff-' + identifier]
-                check_receipt(session['receipt'], replacement, op['request_id'])
+                operations.check_dispatch_message(session['receipt'], replacement, op['request_id'])
         else:
             raise ValueError('invalid network recovery action')
         atomic_json(journal_path, journal)
@@ -572,7 +564,7 @@ def reconcile(runner, state, data, *, observe_only=False):
                 session['dispatch'] = agent['dispatch_id']
             if effect.get('status') != 'completed':
                 raise ValueError('network operation receipt absent; replay forbidden')
-            check_receipt(effect['result'], agent, effect['request_id'])
+            operations.check_dispatch_message(effect['result'], agent, effect['request_id'])
             observed = {k: v for k, v in runner.load_state().items() if k != 'control_uncertain'}
             session.update(status='observing' if permitted(runner, observed, reserved['scope']) else 'cancelled',
                            receipt=effect['result'], next_check_at=None)

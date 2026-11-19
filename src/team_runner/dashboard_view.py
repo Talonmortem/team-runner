@@ -5,9 +5,9 @@ import time
 
 from . import runner_config, team_graph
 from .application import _check_identity, require_scope
-from .event_scope import pending
+from .event_scope import escalation_destination, payload, pending
 from .network_recovery import view as network_view
-from .recovery import liveness_incident
+from .recovery import _unknown, liveness_incident
 from .protocol import ContractError, attempt_identity, operation, summary
 from .runner_store import read_json
 from .verification import view as verification
@@ -83,6 +83,48 @@ def _operations(runner, state, attempt):
             if row.get('status') != 'completed']
 
 
+def _escalations(runner, state, registry, status, messages, *, enable_actions):
+    current = state.get('current') or {}
+    active = [m for m in messages if m['type'] == 'escalation']
+    accepted = [m for m in current.get('messages', []) if m.get('type') == 'escalation'
+                and (m.get('resolution') or {}).get('delivery') == 'accepted']
+    if not (active or accepted):
+        return []
+    can_send = (enable_actions and status['confirmed'] and status['compatibility'] == 'v1'
+                and status['desired_state'] == 'running' and status['goal'] == state.get('goal')
+                and not any(state.get(key) for key in ('paused', 'stop_requested', 'control_uncertain', 'recovery_issues'))
+                and (status.get('blocker') or {}).get('code') != 'unknown_effect' and not _unknown(runner, state))
+    records = []
+    for path in sorted((runner.state_dir / 'commands').glob('*.json'), key=lambda p: p.stat().st_mtime_ns, reverse=True):
+        row = read_json(path, {})
+        command = row.get('command') or {}
+        scope = command.get('scope') or {}
+        data = command.get('payload') or {}
+        if (command.get('action') == 'resolve-escalation' and data.get('resume') is True
+                and scope.get('identity') == status['identity']
+                and scope.get('generation') == status['generation'] and scope.get('attempt') == status['current']['attempt']):
+            records.append(row)
+    results = []
+    for message in [*active, *accepted]:
+        closed = bool(message.get('closed'))
+        record = next((r for r in records if (r['command']['payload']['message_id'] == message['id']
+                       and r['command']['payload'].get('run_id', message['run_id']) == message['run_id'])), {})
+        delivery = record.get('status')
+        if closed:
+            delivery = 'accepted'
+        elif delivery == 'succeeded':
+            delivery = 'unknown'
+        results.append({'id': message['id'], 'run_id': message.get('run_id'),
+                        'dispatch': payload(message).get('dispatchId'),
+                        'text': message.get('text') or message.get('body') or '',
+                        'delivery': delivery,
+                        'request_id': (message.get('resolution') or {}).get('request_id') if closed else record.get('id'),
+                        'error': record.get('error') if delivery == 'failed' else None,
+                        'can_send': bool(can_send and not closed and delivery in (None, 'failed')
+                                         and escalation_destination(state, registry, message)[1])})
+    return results
+
+
 def _future(runner, state):
     try:
         options = state.get('options') or {}
@@ -142,6 +184,8 @@ def view(runner, services, observer, *, enable_actions=False):
             'legacy_roles': [] if graph else sorted(set(snapshot.get('roles', {})) |
                                                  {a['role'] for a in agents if a.get('role')}),
             'future': _future(runner, state), 'enable_actions': enable_actions,
+            'escalations': _escalations(runner, state, registry, status, messages,
+                                        enable_actions=enable_actions and orca['confirmed']),
             'messages': [{'id': m.get('id'), 'type': m['type'],
                           'agent': m['classification']['agent'], 'dispatch': m['classification']['dispatch'],
                           'text': m.get('text') or m.get('body') or ''} for m in messages],

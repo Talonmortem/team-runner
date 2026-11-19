@@ -499,11 +499,18 @@ raise a desktop notification. Pause/stop and unknown identity prevent automatic 
 An operator can settle a reviewed escalation with a versioned `resolve-escalation` command
 through `team-runner command --file FILE` (or the commands API). Use the current summary's
 identity, generation, attempt and revision, a fresh request UUID, and payload
-`{"message_id":"MESSAGE","run_id":"RUN","text":"Decision and reason"}`.
+`{"message_id":"MESSAGE","run_id":"RUN","text":"Decision and reason","resume":false}`.
 Only the named active, registered escalation closes; its original message and the decision
 remain recorded. This is distinct from processing ACKs. Questions, other escalations, unknown
 effects, graph budgets and acceptance gates retain their own guards. Child attempts cannot
 issue this control, and the legacy unscoped command path rejects it.
+
+Set `"resume":true` to send the decision to the same Dispatch. In Dashboard, start
+with `--enable-actions` and use **Отправить решение** on an active escalation.
+The runner closes it after Orca confirms acceptance. Turn start and completion
+are observed separately. If delivery is unconfirmed, run `team-runner reconcile`
+for the selected workspace to check the original Orca request. The command's
+original receipt is preserved.
 
 Create a frozen manifest with `team-runner manifest create --checkout PATH --root backend --root frontend
 --root scripts --root config --manifest FILE`. Save its JSON receipt; feed the returned digest

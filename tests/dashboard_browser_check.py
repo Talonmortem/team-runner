@@ -15,7 +15,7 @@ from team_runner import dashboard, goal_intent, team_graph
 from team_runner.catalog import Catalog
 from team_runner.engine import Runner
 from team_runner.runner_config import defaults
-from team_runner.runner_store import atomic_json, read_json, running
+from team_runner.runner_store import atomic_json, lock, read_json, running
 
 
 class DashboardBrowserCheck(BrowserCheck):
@@ -27,6 +27,8 @@ class DashboardBrowserCheck(BrowserCheck):
         self.switches = []
         self.model_calls = []
         self.orca_unavailable = False
+        self.escalation_sends = []
+        self.escalation_receipt_visible = False
 
     def seed(self):
         alpha, beta = (self.fixture_catalog.project(name)['id'] for name in ('Alpha', 'Beta'))
@@ -100,6 +102,19 @@ class DashboardBrowserCheck(BrowserCheck):
                 return {'worktree': {'id': context.orca_id, 'instanceId': context.orca_instance,
                                      'path': str(context.repo), 'hostId': 'local'}}
             assert context.identity() == self.runner.context.identity()
+            if args[:2] == ('orchestration', 'send'):
+                assert kwargs['mailbox'] == 'fixture-run-mailbox'
+                assert args[2:6] == ('--run', self.coordinator['run_id'],
+                                    '--to', 'dispatch:' + self.coordinator['dispatch_id'])
+                assert args[10:12] == ('--body', 'Продолжите проверку отчёта.')
+                self.escalation_sends.append({'mutation': {'requestId': args[-1]},
+                    'message': {'id': 'fixture-guidance', 'to_handle': args[5], 'run_id': args[3]}})
+                raise RuntimeError('Fixture lost the send response')
+            if args[:2] == ('orchestration', 'request-show'):
+                assert len(self.escalation_sends) == 1
+                receipt = self.escalation_sends[0]
+                assert args[-1] == receipt['mutation']['requestId']
+                return {'state': 'completed', 'receipt': receipt} if self.escalation_receipt_visible else {'state': 'absent'}
             record = self.agent
             terminal = {'handle': record['terminal'], 'incarnationId': record['incarnation'],
                         'worktreeId': context.orca_id}
@@ -291,12 +306,70 @@ class DashboardBrowserCheck(BrowserCheck):
                   'Watch resumed for the same attempt and recorded its outcome')
         assert len(self.model_calls) == 1
 
+    def escalation_scenario(self):
+        self.close_tab()
+        self.stop_server()
+        self.orca_unavailable = False
+        self.coordinator = self.registry['agents'][0]
+        self.coordinator.update(status='active', activity='idle')
+        self.agent['status'] = 'released'
+        self.registry['graph_calls'][0]['status'] = 'completed'
+        atomic_json(self.attempt / 'agents.json', self.registry)
+        escalation = {'id': 'escalation-fixture', 'type': 'escalation', 'run_id': self.coordinator['run_id'],
+                      'body': 'Координатор закончил ход и ожидает решения.',
+                      'payload': {'dispatchId': self.coordinator['dispatch_id'],
+                                  'taskId': self.coordinator['task_id'], 'handle': self.coordinator['terminal'],
+                                  'stopReason': 'finished'}}
+        report = {'id': 'report-fixture', 'type': 'worker_done', 'run_id': self.agent['run_id'],
+                  'payload': {'dispatchId': self.agent['dispatch_id'], 'outcome': 'succeeded'}}
+        self.runner.save_state({'goal': self.goal, 'history': [], 'run_id': self.coordinator['run_id'],
+            'mailbox': 'fixture-run-mailbox', 'current': {'attempt_dir': str(self.attempt), 'item': 'T1',
+                'dispatch_id': self.coordinator['dispatch_id'], 'messages': [report, escalation]}})
+
+        self.open(self.start_server(enable_actions=False))
+        self.choose('Alpha main')
+        self.dom("document.querySelector('#escalations').textContent.includes('ожидает решения')",
+                 'Passive Dashboard shows the active escalation')
+        self.dom("!document.querySelector('#escalations button, #escalations textarea')",
+                 'Passive Dashboard has no escalation command controls')
+        self.close_tab()
+        self.stop_server()
+        self.open(self.start_server())
+        self.choose('Alpha main')
+        self.fill('#escalations textarea', 'Продолжите проверку отчёта.')
+        self.click_visible('#escalations button')
+        self.dom("document.querySelector('#escalations').textContent.includes('Ожидается подтверждение Orca')",
+                 'Dashboard shows pending confirmation')
+        self.wait(lambda: list((self.runner.state_dir / 'commands').glob('*.json')), 'Command journaled')
+        assert not self.escalation_sends
+        self.runner_process.terminate()
+        self.runner_process.communicate(timeout=5)
+        self.runner_process = None
+        runner = self.make_runner(self.runner.context)
+        runner.launcher.reconcile_attempt = lambda *args, **kwargs: []
+        with lock(runner.state_dir / 'runner.lock'):
+            runner.process_controls(runner.load_state())
+            runner.recover(runner.load_state(), technical_only=True)
+        self.dom("document.querySelector('#escalations').textContent.includes('Требуется сверка с Orca') && "
+                 "!document.querySelector('#escalations button')", 'Unknown delivery remains fenced')
+        assert not self.runner.load_state()['current']['messages'][-1].get('closed')
+        command_path, = (self.runner.state_dir / 'commands').glob('*.json')
+        receipt = command_path.read_bytes()
+        self.escalation_receipt_visible = True
+        with lock(runner.state_dir / 'runner.lock'):
+            runner.recover(runner.load_state(), technical_only=True)
+        self.dom("document.querySelector('#escalations').textContent.includes('Сообщение принято Orca')",
+                 'Dashboard shows Orca acceptance after reconciliation')
+        assert self.runner.load_state()['current']['messages'][-1]['closed']
+        assert len(self.escalation_sends) == 1 and command_path.read_bytes() == receipt
+
     def run(self):
         original_runner = dashboard.Runner
         try:
             self.scenario()
+            self.escalation_scenario()
             atomic_json(self.evidence / 'dashboard-browser-result.json', {'status': 'PASS', 'steps': self.steps})
-            print('PASS: isolated checkout/graph, terminal, outage, report, watch, panel restart')
+            print('PASS: isolated checkout/graph, terminal, outage, report, watch, panel restart, escalation delivery')
         except Exception as exc:
             atomic_json(self.evidence / 'dashboard-browser-result.json',
                         {'status': 'FAIL', 'steps': self.steps, 'error': str(exc)})

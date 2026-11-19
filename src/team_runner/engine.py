@@ -1373,9 +1373,9 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             if not cur.get('attempt_dir') or classify(
                     message, cur, self.launcher.registry(cur['attempt_dir']))['kind'] != 'active':
                 raise ValueError('escalation is not owned by an active registered Dispatch')
-            message.update(closed=True, closed_reason='explicit resolution',
-                           resolution={'request_id': command_id, 'text': data['text'],
-                                       'at': dt.datetime.now(dt.timezone.utc).isoformat()})
+            if data.get('resume') is True:
+                self.deliver_escalation(st, message, data, command_id)
+            self.close_escalation(message, command_id, data['text'], delivered=data.get('resume') is True)
         elif action == 'reply':
             from . import resource_wait
             resource = '_resource_wait' in data
@@ -1530,6 +1530,83 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         operations.checkpoint('command:after_save')
 
 
+    def deliver_escalation(self, st, message, data, command_id):
+        from .application import _check_identity, _execution_scope
+        from .event_scope import escalation_destination
+        from .goal_intent import read
+        from .recovery import _unknown
+        attempt = st['current']['attempt_dir']
+        guard = data.get('_scope')
+        with lock(self.state_dir / 'goal-intent.lock'), lock(Path(attempt) / 'agents.lock'):
+            intent = read(self)
+            if (not command_id or not intent or intent['desired_state'] != 'running'
+                    or intent['goal'] != st.get('goal') or guard != _execution_scope(self, st)
+                    or st.get('paused') or st.get('stop_requested') or st.get('control_uncertain')
+                    or st.get('recovery_issues') or st.get('stop_status') == 'unknown'):
+                raise ValueError('escalation continuation requires an active, reconciled execution')
+            self.context.check_attempt(attempt)
+            _check_identity(self, self.context.identity())
+            registry = self.launcher.registry(attempt)
+            agent, mailbox = escalation_destination(st, registry, message)
+            if not agent or not mailbox or _unknown(self, st):
+                raise ValueError('escalation Dispatch or Run mailbox unavailable, or work remains unresolved')
+            try:
+                self.context.verify(self.launcher.orca)
+            except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                raise ValueError('escalation workspace verification failed: ' + str(exc)) from exc
+            self.effect(st, 'escalation-resume:' + command_id, *self.escalation_args(agent, data['text']),
+                        mailbox=mailbox, evidence={'scope': guard, 'message_id': message['id']})
+
+    @staticmethod
+    def escalation_args(agent, text):
+        return ['orchestration', 'send', '--run', agent['run_id'],
+                '--to', 'dispatch:' + agent['dispatch_id'], '--type', 'status',
+                '--subject', 'Operator guidance after escalation', '--body', text]
+
+    @staticmethod
+    def close_escalation(message, command_id, text, *, delivered=False):
+        message.update(closed=True, closed_reason='explicit resolution',
+                       resolution={'request_id': command_id, 'text': text,
+                                   'at': dt.datetime.now(dt.timezone.utc).isoformat()})
+        if delivered:
+            message['resolution']['delivery'] = 'accepted'
+
+    def reconcile_escalation_delivery(self, st, identifier, command, op, scope):
+        envelope = command.get('command') or {}
+        data = envelope.get('payload') or {}
+        external = envelope.get('scope') or {}
+        guard = command.get('guard') or {}
+        evidence = op.get('evidence') or {}
+        if (command.get('id') != identifier or envelope.get('request_id') != identifier
+                or command.get('action') != 'resolve-escalation' or envelope.get('action') != 'resolve-escalation'
+                or data.get('resume') is not True or op.get('status') != 'completed'
+                or external.get('identity') != self.context.identity()
+                or not operations.same_reply_scope(guard, scope)
+                or any(external.get(key) != scope[key] for key in ('generation', 'attempt'))
+                or evidence.get('scope') != guard or evidence.get('message_id') != data.get('message_id')
+                or not scope.get('attempt')):
+            return False
+        matches = [m for m in st['current'].get('messages', []) if m.get('type') == 'escalation'
+                   and m.get('id') == data['message_id']
+                   and (not data.get('run_id') or data['run_id'] == m.get('run_id'))]
+        if len(matches) != 1:
+            return False
+        from .event_scope import escalation_agent
+        try:
+            self.context.check_attempt(st['current']['attempt_dir'])
+            registry = self.launcher.registry(st['current']['attempt_dir'])
+            agent = escalation_agent(registry, matches[0])
+            if not agent or op.get('args') != self.escalation_args(agent, data['text']):
+                return False
+            operations.check_dispatch_message(op.get('result') or {}, agent, op.get('request_id'))
+        except (ValueError, operations.UncertainOperation):
+            return False
+        if not matches[0].get('closed'):
+            self.close_escalation(matches[0], identifier, data['text'], delivered=True)
+        resolution = matches[0].get('resolution') or {}
+        return resolution.get('request_id') == identifier and resolution.get('delivery') == 'accepted'
+
+
     def reconcile_reply(self, st, identifier, command, journal):
         from .application import _execution_scope
         if command.get('id') != identifier or command.get('action') != 'reply':
@@ -1663,8 +1740,9 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         if uncertain:
             command_path = self.state_dir / 'commands' / (uncertain + '.json')
             command = read_json(command_path, {})
-            reply_proved = self.reconcile_reply(st, uncertain, command, journal)
-            if reply_proved:
+            if (self.reconcile_reply(st, uncertain, command, journal)
+                    or self.reconcile_escalation_delivery(st, uncertain, command,
+                                                        journal.get('escalation-resume:' + uncertain, {}), scope)):
                 st.pop('control_uncertain', None)
                 uncertain = None
             elif 'schema_version' in command:

@@ -79,6 +79,8 @@ button:disabled { opacity: .46; cursor: default; }
 #progress-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
 progress { width: min(14rem, 65%); height: 6px; accent-color: var(--accent); }
 .notice { padding: 8px 12px; background: #312822; color: #ffd1a5; border-radius: 6px; overflow-wrap: anywhere; }
+#escalations label, #escalations textarea { display: block; }
+#escalations textarea { width: 100%; margin: 4px 0 8px; padding: 6px 8px; resize: vertical; }
 .tabs { display: flex; flex-wrap: wrap; gap: 3px; border-bottom: 1px solid var(--line); padding: 0 12px; }
 .tabs button { border: none; border-radius: 0; border-bottom: 2px solid transparent; padding: 10px 8px; background: transparent; color: var(--muted); }
 .tabs button[aria-current="page"] { color: #e7ebf2; border-bottom-color: var(--accent); }

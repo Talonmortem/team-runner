@@ -97,3 +97,31 @@ def messages(current, registry):
 def pending(current, registry, types=('question', 'escalation')):
     return [m for m in messages(current, registry) if m.get('type') in types
             and not m.get('closed') and not m.get('answered') and m['classification']['kind'] == 'active']
+
+
+def escalation_agent(registry, message):
+    event = payload(message)
+    matches = [agent for agent in registry.get('agents', [])
+               if not agent.get('superseded_by') and all(
+                   agent.get(key) and agent[key] == value for key, value in (
+                       ('dispatch_id', event.get('dispatchId')), ('task_id', event.get('taskId')),
+                       ('run_id', message.get('run_id'))))]
+    return matches[0] if len(matches) == 1 else None
+
+
+def escalation_destination(state, registry, message):
+    agent = escalation_agent(registry, message)
+    if (not agent or agent.get('status') != 'active' or registry.get('fenced')
+            or registry.get('stop_requested') or registry.get('recovery_issues')
+            or classify(message, state['current'], registry)['kind'] != 'active'
+            or any(call.get('parent_agent') == agent['id'] and call.get('status') not in ('completed', 'stopped')
+                   for call in registry.get('graph_calls', []))):
+        return None, None
+    if agent.get('role') == 'coordinator' and (agent['run_id'] != state.get('run_id')
+            or state['current'].get('task_id', agent['task_id']) != agent['task_id']):
+        return None, None
+    if agent['run_id'] == state.get('run_id'):
+        return agent, state.get('mailbox')
+    mailboxes = [run['mailbox'] for run in registry.get('runs', []) if run.get('run_id') == agent['run_id']
+                 and run.get('status', 'ready') == 'ready' and run.get('mailbox')]
+    return agent, mailboxes[0] if len(mailboxes) == 1 else None

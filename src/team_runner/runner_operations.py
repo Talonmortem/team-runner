@@ -91,6 +91,8 @@ def _perform(path, key, op, call):
                 args = [*args, '--retry-request', op['request_id']]
             result = call(*args, mailbox=op.get('mailbox'))
             checkpoint(op['args'][1] + ':after_effect')
+            if key.startswith('escalation-resume:'):
+                check_escalation_receipt(op, result)
             journal = read_json(path, {})
             status = 'pending' if (op.get('evidence') or {}).get('launch') else 'completed'
             op.update(status=status, stage='receipt', result=result)
@@ -136,6 +138,23 @@ def mutation(path, key, call, *args, mailbox=None, evidence=None):
     return _perform(path, key, op, call)
 
 
+def check_dispatch_message(receipt, agent, request):
+    message = receipt.get('message') if isinstance(receipt, dict) else None
+    mutation = receipt.get('mutation') if isinstance(receipt, dict) else None
+    if (not request or not isinstance(message, dict) or not isinstance(mutation, dict)
+            or receipt.get('ok') is False or not isinstance(message.get('id'), str) or not message['id']
+            or message.get('to_handle') != 'dispatch:' + agent['dispatch_id']
+            or message.get('run_id') != agent['run_id']
+            or mutation.get('requestId') != request):
+        raise UncertainOperation('dispatch message acceptance receipt identity unconfirmed')
+
+
+def check_escalation_receipt(op, result):
+    args = op['args']
+    agent = {'run_id': args[3], 'dispatch_id': args[5].removeprefix('dispatch:')}
+    check_dispatch_message(result, agent, op.get('request_id'))
+
+
 def receipt_result(receipt):
     # Orca versions may persist the full transport envelope or its result.
     if receipt.get('ok') is False:
@@ -162,6 +181,12 @@ def reconcile(path, call, *, reply_mailboxes=None):
             except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
                 issues.append(f'{key}: {exc}')
             continue
+        if op['status'] == 'completed' and key.startswith('escalation-resume:'):
+            try:
+                check_escalation_receipt(op, op.get('result'))
+            except UncertainOperation:
+                op.update(status='unknown')
+                op.pop('result', None)
         if op['status'] in ('completed', 'rejected'):
             continue
         if rejected_dispatch(op) or rejected_reply(op):
@@ -173,7 +198,9 @@ def reconcile(path, call, *, reply_mailboxes=None):
             else:
                 mailbox = op.get('mailbox')
                 args = op['args']
-                if (reply_mailboxes and args[:2] == ['orchestration', 'reply']
+                if key.startswith('escalation-resume:') and reply_mailboxes:
+                    mailbox = reply_mailboxes.get(args[3]) or mailbox
+                elif (reply_mailboxes and args[:2] == ['orchestration', 'reply']
                         and len(args) == 8 and args[6] == '--run'):
                     mailbox = reply_mailboxes.get(args[7]) or mailbox
                 receipt = call('orchestration', 'request-show', '--request', op['request_id'], mailbox=mailbox)
@@ -186,6 +213,8 @@ def reconcile(path, call, *, reply_mailboxes=None):
                                   error=str(receipt['receipt'].get('error')))
                         continue
                 result = receipt_result(receipt['receipt'])
+                if key.startswith('escalation-resume:'):
+                    check_escalation_receipt(op, result)
             op.update(status='completed', stage='reconciled', result=result)
             op.pop('error', None)
         except Exception as exc:
@@ -403,6 +432,8 @@ def continue_operation(path, request_id, call):
     if not found:
         raise ValueError('unknown operation')
     key, op = found
+    if key.startswith('escalation-resume:'):
+        raise ValueError('Escalation delivery can only be reconciled by reading the original receipt')
     if op['status'] == 'completed':
         return op['result']
     if op['status'] == 'rejected' or rejected_reply(op):

@@ -20,6 +20,7 @@ let view = 'graph', inspector = 'agent', focusStatus = '';
 let dialog = null, dialogId = null, dialogs = [], chatBusy = false, unsynced = null;
 let usageRequest = 0, dialogRequest = 0, replyDraft = null;
 const pendingState = new Set();
+const escalationDrafts = new Map(), escalationRequests = new Map();
 const orderKey = 'team-runner.sidebar-order';
 let sidebarOrder = {projects: [], workspaces: {}};
 let draggedRow = null;
@@ -98,6 +99,77 @@ async function api(path, data) {
 function scope() {
   const {identity, generation, revision, current} = state.summary;
   return {identity, generation, revision, attempt: current.attempt};
+}
+
+async function sendEscalation(message, key, input) {
+  input.setCustomValidity(input.value.trim() ? '' : 'Введите решение');
+  if (escalationRequests.has(key) || !input.reportValidity()) return;
+  const command = {schema_version: 1, request_id: crypto.randomUUID(), action: 'resolve-escalation',
+    scope: scope(), payload: {message_id: message.id, run_id: message.run_id, text: input.value, resume: true}};
+  const path = base, target = selection;
+  escalationRequests.set(key, {status: 'pending', id: command.request_id});
+  renderEscalations();
+  try {
+    const receipt = await api(path + '/commands', command);
+    if (receipt.request_id !== command.request_id || receipt.action !== command.action ||
+        !['pending', 'running', 'unknown', 'failed', 'succeeded'].includes(receipt.status)) {
+      throw new Error('Квитанция команды не подтверждена');
+    }
+    escalationRequests.set(key, {status: receipt.status === 'succeeded' && receipt.result?.delivery === 'accepted'
+      ? 'accepted' : receipt.status, id: command.request_id, error: receipt.error?.message});
+  } catch (error) {
+    escalationRequests.set(key, {status: error.responseStatus && error.responseStatus < 500 ? 'failed' : 'unknown',
+      id: command.request_id, error: error.message});
+  } finally {
+    if (target === selection) {
+      renderEscalations();
+      void refresh();
+    }
+  }
+}
+
+function renderEscalations() {
+  const section = $('escalations'), summary = state?.summary;
+  const enabled = !$('state-error').textContent;
+  const prefix = [base, summary?.generation, summary?.current.attempt];
+  const cards = (state?.escalations || []).map(message => {
+    const key = JSON.stringify([...prefix, message.run_id, message.id, message.dispatch]);
+    let request = escalationRequests.get(key);
+    if (request && (message.delivery === 'accepted' ||
+        (message.request_id === request.id && ['failed', 'unknown'].includes(message.delivery)))) {
+      escalationRequests.delete(key);
+      request = undefined;
+    }
+    const delivery = message.delivery === 'accepted' ? message.delivery : request?.status || message.delivery;
+    return {message, key, delivery, error: request?.error || message.error?.message,
+      canSend: enabled && message.can_send && (!request || request.status === 'failed')};
+  });
+  cached(section, cards, parent => {
+    parent.replaceChildren();
+    parent.hidden = !cards.length;
+    for (const {message, key, delivery, error, canSend} of cards) {
+      const card = node('article', null, parent, {class: 'notice'});
+      node('h2', 'Эскалация', card);
+      node('p', message.text, card, {class: 'question-text'});
+      const text = ({pending: 'Ожидается подтверждение Orca', running: 'Ожидается подтверждение Orca',
+        accepted: 'Сообщение принято Orca', unknown: 'Требуется сверка с Orca',
+        succeeded: 'Требуется сверка с Orca', failed: error || 'Решение не отправлено'})[delivery];
+      if (text) node('p', text, card, {role: 'status'});
+      if (!canSend) continue;
+      const label = node('label', 'Решение', card);
+      const input = node('textarea', null, label, {required: '', maxlength: '32000', rows: '2'});
+      input.value = escalationDrafts.get(key) || '';
+      input.oninput = () => {
+        input.setCustomValidity('');
+        escalationDrafts.set(key, input.value);
+      };
+      const button = node('button', 'Отправить решение', card, {type: 'button'});
+      button.onclick = () => {
+        if (escalationRequests.get(key)?.status === 'failed') escalationRequests.delete(key);
+        void sendEscalation(message, key, input);
+      };
+    }
+  });
 }
 
 function orderedIds(items, order) {
@@ -490,7 +562,9 @@ function renderState() {
     $('progress-count').textContent = summary.progress.completed + ' / ' + summary.progress.total;
   }
   const questions = pendingQuestions();
-  status('blocker', questions.length && summary?.blocker?.code === 'answer_required'
+  const escalationVisible = state?.escalations?.some(message => message.delivery !== 'accepted');
+  status('blocker', (questions.length && summary?.blocker?.code === 'answer_required') ||
+    (escalationVisible && summary?.blocker?.code === 'escalation_required')
     ? '' : summary?.blocker?.message);
   cached($('pending-questions'), questions, parent => {
     parent.replaceChildren();
@@ -510,6 +584,7 @@ function renderState() {
       }
     }
   });
+  renderEscalations();
   renderAttempt();
   renderAgent();
   renderFuture();
@@ -613,6 +688,7 @@ async function refresh() {
   } catch (error) {
     if (target === selection) {
       status('state-error', error.message);
+      renderEscalations();
     }
   } finally {
     pendingState.delete(target);

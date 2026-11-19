@@ -9,7 +9,7 @@ import subprocess
 import threading
 import webbrowser
 
-from . import dashboard_view, orca
+from . import application, dashboard_view, orca
 from .dashboard_hoster import Hoster
 from .dashboard_usage import UsageCollector
 from .engine import Runner
@@ -115,6 +115,15 @@ def make_server(catalog, port=0, *, session_dir=None, enable_actions=False, serv
         def workspace(self, runner, route, mutate):
             if route == 'state' and not mutate:
                 return dashboard_view.view(runner, services, observer, enable_actions=enable_actions)
+            if route == 'commands' and mutate:
+                if not enable_actions:
+                    raise ContractError('actions_disabled', 'Escalation delivery requires --enable-actions')
+                command = self.body()
+                payload = command.get('payload')
+                if (command.get('action') != 'resolve-escalation' or not isinstance(payload, dict)
+                        or payload.get('resume') is not True):
+                    raise ContractError('action_unavailable', 'Dashboard command must send an escalation decision')
+                return application.submit_v1(runner, command)
             if route == 'focus' and mutate:
                 if not enable_actions:
                     raise ContractError('actions_disabled', 'Terminal switching requires --enable-actions')

@@ -1,13 +1,21 @@
 """Explicit operator decisions settle only the addressed, owned escalation."""
 import copy
+import contextlib
+import io
+import json
 import os
+from pathlib import Path
+from threading import Thread
 import unittest
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 import uuid
 from unittest.mock import patch
 
 import test_platform as fixtures
 import test_team_graph as graph_fixtures
-from team_runner import application, autonomy, event_scope, goal_intent, protocol
+from team_runner import application, autonomy, event_scope, goal_intent, protocol, runner_ui
+from team_runner.cli import main
 from team_runner.runner_store import atomic_json, read_json
 
 
@@ -36,12 +44,13 @@ class EscalationResolution(unittest.TestCase):
         self.a.save_state(state)
         return attempt, call, escalation
 
-    def command(self, message_id='budget-request'):
+    def command(self, message_id='budget-request', *, resume=False):
         view = protocol.summary(self.a)
         return {'schema_version': 1, 'request_id': str(uuid.uuid4()), 'action': 'resolve-escalation',
                 'scope': {'identity': view['identity'], 'generation': view['generation'],
                           'attempt': view['current']['attempt'], 'revision': view['revision']},
-                'payload': {'message_id': message_id, 'text': 'Approved this repair; keep acceptance gates.'}}
+                'payload': {'message_id': message_id, 'resume': resume,
+                            'text': 'Approved this repair; keep acceptance gates.'}}
 
     def test_explicit_resolution_unblocks_grant_and_is_durable_idempotent(self):
         attempt, call, escalation = self.setup_escalations()
@@ -61,6 +70,213 @@ class EscalationResolution(unittest.TestCase):
         self.assertIsNotNone(autonomy.grant(self.a, attempt, call['id']))
         _, child = self.delegate(attempt, self.a.launcher.registry(attempt)['agents'][0], request=call['id'])
         self.assertIsNotNone(child)
+
+    def resume_command(self, *, open_child=False):
+        attempt, root = self.prepare()
+        goal = application.goals(self.a)[0]
+        goal_intent.authorize(self.a, {'goal': goal}, str(uuid.uuid4()))
+        _, child = self.delegate(attempt, root)
+        if not open_child:
+            self.finish(attempt, child)
+            self.assertEqual(self.a.launcher.registry(attempt)['graph_calls'][0]['status'], 'completed')
+            self.assertEqual(self.a.launcher.liveness(root['dispatch_id']), 'live')
+        state = self.a.load_state()
+        state.update(goal=goal, run_id=root['run_id'], mailbox='parent-mailbox')
+        state['current'].setdefault('messages', []).append({'id': 'budget-request', 'type': 'escalation', 'run_id': root['run_id'],
+            'payload': {'dispatchId': root['dispatch_id'], 'taskId': root['task_id'],
+                        **({} if open_child else {'handle': root['terminal'], 'stopReason': 'finished'})}})
+        self.a.save_state(state)
+        command = self.command()
+        command['payload'].update(resume=True, run_id=root['run_id'])
+        return root, command
+
+    def test_resume_sends_guidance_to_same_dispatch_once(self):
+        root, command = self.resume_command()
+        def send(*args, **kwargs):
+            job = read_json(self.a.state_dir / 'operations.json')['escalation-resume:' + command['request_id']]
+            self.assertEqual(job['status'], 'pending')
+            self.assertEqual(job['request_id'], args[-1])
+            self.assertFalse(self.escalation().get('closed'))
+            return self.a.launcher.orca(*args, **kwargs)
+
+        with patch.object(self.a, 'orca', side_effect=send) as call:
+            receipt = application.submit_v1(self.a, command)
+            self.assertEqual(receipt['status'], 'succeeded', receipt)
+            self.assertEqual(receipt['result']['delivery'], 'accepted')
+            self.assertEqual(application.submit_v1(self.a, command), receipt)
+        call.assert_called_once()
+        self.assertEqual(call.call_args.args[:8], ('orchestration', 'send', '--run', root['run_id'],
+                          '--to', 'dispatch:' + root['dispatch_id'], '--type', 'status'))
+        self.assertEqual(call.call_args.kwargs['mailbox'], 'parent-mailbox')
+        self.assertTrue(self.escalation()['closed'])
+
+    def escalation(self, state=None):
+        return next(m for m in (state or self.a.load_state())['current']['messages'] if m['id'] == 'budget-request')
+
+    def test_resume_reconciles_exact_receipt_without_resending(self):
+        _, command = self.resume_command()
+        transport = self.a.launcher.orca
+        delivered = {}
+        receipt_variant = None
+
+        def call(*args, **kwargs):
+            if args[:2] == ('orchestration', 'send'):
+                self.assertFalse(delivered)
+                delivered[args[-1]] = transport(*args, **kwargs)
+                raise RuntimeError('response lost')
+            if args[:2] == ('orchestration', 'request-show'):
+                if receipt_variant is None:
+                    return {'state': 'absent'}
+                result = copy.deepcopy(delivered[args[-1]])
+                if receipt_variant in ('run_id', 'to_handle'):
+                    result['message'][receipt_variant] = 'foreign'
+                elif receipt_variant == 'requestId':
+                    result['mutation']['requestId'] = 'foreign'
+                return {'state': 'completed', 'receipt': {'ok': True, 'result': result}}
+            return transport(*args, **kwargs)
+
+        with patch.object(self.a, 'orca', side_effect=call), \
+                patch.object(self.a.launcher, 'reconcile_attempt', return_value=[]):
+            receipt = application.submit_v1(self.a, command)
+            self.assertEqual(receipt['status'], 'unknown', receipt)
+            state = self.a.load_state()
+            follow_up = dict(self.command(), payload=command['payload'])
+            with self.assertRaisesRegex(protocol.ContractError, 'Reconcile the unconfirmed effect'):
+                application.submit_v1(self.a, follow_up)
+            for receipt_variant in (None, 'run_id', 'to_handle', 'requestId'):
+                with self.subTest(receipt=receipt_variant):
+                    self.a.recover(state, technical_only=True)
+                    self.assertIn('control_uncertain', state)
+                    self.assertFalse(self.escalation(state).get('closed'))
+            original_request = next(iter(delivered))
+            with self.assertRaisesRegex(ValueError, 'original receipt'):
+                self.a.recover(state, original_request, technical_only=True)
+            receipt_variant = 'exact'
+            self.a.recover(state, technical_only=True)
+        self.assertNotIn('control_uncertain', state)
+        self.assertTrue(self.escalation(state)['closed'])
+        self.assertEqual(protocol.operation(self.a, command['request_id']), receipt)
+        self.assertEqual(application.submit_v1(self.a, command), receipt)
+
+    def test_owner_interrupts_after_send_and_recovers_original_request(self):
+        _, command = self.resume_command()
+
+        class OwnerExited(BaseException):
+            pass
+
+        def checkpoint(stage):
+            if stage == 'send:after_effect':
+                self.assertFalse(self.escalation().get('closed'))
+                raise OwnerExited
+
+        with patch('team_runner.runner_operations.checkpoint', side_effect=checkpoint), self.assertRaises(OwnerExited):
+            application.submit_v1(self.a, command)
+        state = self.a.load_state()
+        self.a.process_controls(state)
+        interrupted = protocol.operation(self.a, command['request_id'])
+        self.assertEqual(interrupted['status'], 'unknown')
+        with patch.object(self.a, 'orca', wraps=self.a.orca) as call:
+            self.a.recover(state, technical_only=True)
+        self.assertTrue(self.escalation(state)['closed'])
+        self.assertFalse(any(c.args[:2] == ('orchestration', 'send') for c in call.call_args_list))
+        self.assertEqual(application.submit_v1(self.a, command), interrupted)
+
+    def test_foreign_immediate_receipt_requires_reconciliation(self):
+        _, command = self.resume_command()
+        transport = self.a.orca
+
+        def call(*args, **kwargs):
+            result = transport(*args, **kwargs)
+            if args[:2] == ('orchestration', 'send'):
+                self.assertFalse(self.escalation().get('closed'))
+                result['message']['to_handle'] = 'dispatch:other'
+            return result
+
+        with patch.object(self.a, 'orca', side_effect=call):
+            receipt = application.submit_v1(self.a, command)
+        self.assertEqual(receipt['status'], 'unknown')
+        op = read_json(self.a.state_dir / 'operations.json')['escalation-resume:' + command['request_id']]
+        self.assertEqual(op['status'], 'unknown')
+        self.assertFalse(self.escalation().get('closed'))
+        self.a.recover(self.a.load_state(), technical_only=True)
+        self.assertTrue(self.escalation()['closed'])
+
+    def test_paused_open_child_and_unknown_effect_prevent_delivery(self):
+        root, command = self.resume_command(open_child=True)
+        with patch.object(self.a, 'orca', wraps=self.a.orca) as call:
+            self.assertEqual(application.submit_v1(self.a, command)['status'], 'failed')
+            state = self.a.load_state()
+            attempt = state['current']['attempt_dir']
+            child = next(agent for agent in self.a.launcher.registry(attempt)['agents'] if agent['id'] != root['id'])
+            self.finish(Path(attempt), child)
+            atomic_json(self.a.state_dir / 'operations.json', {'unsettled': {'status': 'unknown'}})
+            with self.assertRaisesRegex(protocol.ContractError, 'Reconcile the unconfirmed effect'):
+                application.submit_v1(self.a, self.command(resume=True))
+            (self.a.state_dir / 'operations.json').unlink()
+            goal_intent.change(self.a, desired_state='paused')
+            self.assertEqual(application.submit_v1(self.a, self.command(resume=True))['status'], 'failed')
+        self.assertFalse(any(c.args[:2] == ('orchestration', 'send') for c in call.call_args_list))
+
+    def test_new_resume_required_and_accepted_legacy_command_is_local(self):
+        self.setup_escalations()
+        command = self.command()
+        del command['payload']['resume']
+        with self.assertRaisesRegex(protocol.ContractError, 'explicit boolean resume'):
+            application.submit_v1(self.a, command)
+        with self.assertRaisesRegex(protocol.ContractError, 'explicit boolean resume'):
+            application.submit_v1(self.a, dict(command, payload=dict(command['payload'], resume=0)))
+        state = self.a.load_state()
+        path = self.a.state_dir / 'commands' / (command['request_id'] + '.json')
+        atomic_json(path, {'schema_version': 1, 'id': command['request_id'], 'action': command['action'],
+                           'command': command, 'guard': application._execution_scope(self.a, state), 'status': 'pending'})
+        with patch.object(self.a, 'orca', wraps=self.a.orca) as call:
+            self.a.process_controls(state)
+        call.assert_not_called()
+        receipt = protocol.operation(self.a, command['request_id'])
+        self.assertEqual(receipt['status'], 'succeeded')
+        self.assertTrue(self.escalation()['closed'])
+        self.assertEqual(application.submit_v1(self.a, command), receipt)
+
+    def test_cli_and_api_share_the_command_receipt(self):
+        self.setup_escalations()
+        command = self.command()
+        path = self.root / 'resolution.json'
+        atomic_json(path, command)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), patch('team_runner.cli.Catalog', return_value=self.catalog):
+            self.assertEqual(main(['command', '--project', self.a.context.project_id,
+                                   '--workspace', self.a.context.workspace_id, '--file', str(path)]), 0)
+        receipt = json.loads(out.getvalue())
+        self.assertEqual(receipt['status'], 'succeeded')
+        server, token = runner_ui.make_server(self.catalog)
+        worker = Thread(target=server.serve_forever)
+        worker.start()
+        try:
+            url = f'http://127.0.0.1:{server.server_port}'
+            workspace = f'/api/projects/{self.a.context.project_id}/workspaces/{self.a.context.workspace_id}'
+
+            def post(value):
+                return urlopen(Request(url + workspace + '/commands', data=json.dumps(value).encode(),
+                               headers={'Origin': url, 'Authorization': 'Bearer ' + token,
+                                        'Content-Type': 'application/json'}), timeout=3)
+
+            with post(command) as response:
+                self.assertEqual(json.load(response), receipt)
+            with self.assertRaises(HTTPError) as stale:
+                post(dict(command, request_id=str(uuid.uuid4())))
+            self.assertEqual(json.load(stale.exception)['error']['code'], 'stale_revision')
+            state = self.a.load_state()
+            second = dict(self.escalation(state), id='api-decision', closed=False)
+            second.pop('resolution')
+            state['current']['messages'].append(second)
+            self.a.save_state(state)
+            with post(self.command('api-decision')) as response:
+                self.assertEqual(json.load(response)['status'], 'succeeded')
+            self.assertTrue(self.a.load_state()['current']['messages'][-1]['closed'])
+        finally:
+            server.shutdown()
+            worker.join()
+            server.server_close()
 
     def test_other_escalations_questions_and_unknown_effects_remain_fences(self):
         attempt, call, escalation = self.setup_escalations()

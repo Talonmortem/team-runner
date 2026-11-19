@@ -286,7 +286,7 @@ def _submit_command(runner, action, data, request_id):
         return record
 
 
-def _control_payload(action, payload):
+def _control_payload(action, payload, *, journaled=False):
     """Reject transport-only/internal fields before a command reaches the owner."""
     if action == 'autonomy':
         if (not isinstance(payload, dict) or set(payload) - {'enabled', 'unlimited_passes'}
@@ -306,7 +306,7 @@ def _control_payload(action, payload):
     fields = {'pause': set(), 'stop': set(), 'reconcile': set(),
               'retry': {'force', 'refresh', 'refresh_context', 'allow_extra_attempt', 'reset_attempts', 'reset_reason', 'saved_settings'},
               'reply': {'message_id', 'text', 'run_id'}, 'resolve': {'choice'},
-              'resolve-escalation': {'message_id', 'text', 'run_id'},
+              'resolve-escalation': {'message_id', 'text', 'run_id', 'resume'},
               'continue-operation': {'operation_id'}}
     if not isinstance(action, str) or action not in fields:
         raise ContractError('unknown_action', 'Unsupported command action')
@@ -325,6 +325,9 @@ def _control_payload(action, payload):
     if action in ('reply', 'resolve-escalation') and 'run_id' in payload and (not isinstance(payload['run_id'], str)
             or not payload['run_id'] or len(payload['run_id']) > 512):
         raise ContractError('invalid_payload', 'run_id must be a nonempty run identifier')
+    if (action == 'resolve-escalation' and ('resume' in payload or not journaled)
+            and type(payload.get('resume')) is not bool):
+        raise ContractError('invalid_payload', 'An explicit boolean resume is required')
     if action == 'resolve' and payload.get('choice') not in ('start', 'skip', 'stop'):
         raise ContractError('invalid_payload', 'Resolution must be start, skip or stop')
     if action == 'continue-operation' and (not isinstance(payload.get('operation_id'), str) or not payload['operation_id']):
@@ -370,7 +373,6 @@ def _submit_v1(runner, command):
     except (TypeError, ValueError):
         raise ContractError('invalid_command', 'Command must contain finite JSON values') from None
     identifier = request_id(command['request_id'])
-    _control_payload(command['action'], command['payload'])
     scope = command['scope']
     if not isinstance(scope, dict) or set(scope) != {'identity', 'generation', 'attempt', 'revision'}:
         raise ContractError('invalid_scope', 'Expected identity, generation, attempt and revision')
@@ -381,13 +383,18 @@ def _submit_v1(runner, command):
     with lock(runner.state_dir / 'commands.lock'):
         previous = read_json(path)
         if previous:
+            _control_payload(command['action'], command['payload'], journaled=True)
             if previous.get('schema_version') != 1 or previous.get('command') != command:
                 raise ContractError('request_conflict', 'request_id already used for another command')
             return operation(runner, identifier)
         if (runner.state_dir / 'ui/commands' / (identifier + '.json')).exists():
             raise ContractError('request_conflict', 'request_id already used in legacy UI journal')
+        _control_payload(command['action'], command['payload'])
         current = summary(runner)
         require_scope(current, scope)
+        if (command['action'] == 'resolve-escalation' and command['payload']['resume']
+                and (current.get('blocker') or {}).get('code') == 'unknown_effect'):
+            raise ContractError('unknown_effect', 'Reconcile the unconfirmed effect before sending an escalation decision')
         state = runner.load_state()
         guard = _execution_scope(runner, state)
         if guard['generation'] != scope['generation'] or guard['attempt'] != scope['attempt']:
@@ -435,7 +442,7 @@ def process_v1(runner, state, path, record):
     try:
         command = record['command']
         version(command)
-        _control_payload(command['action'], command['payload'])
+        _control_payload(command['action'], command['payload'], journaled=True)
         _check_identity(runner, command['scope']['identity'])
         if record['guard'] != _execution_scope(runner, state):
             raise ContractError('stale_scope', 'Command belongs to a previous execution')
@@ -453,6 +460,8 @@ def process_v1(runner, state, path, record):
                 record['stop_guard'] = _execution_scope(runner, state)
                 atomic_json(path, record)
         data = dict(command['payload'], _target=record['guard']['attempt'])
+        if record['action'] == 'resolve-escalation':
+            data['_scope'] = record['guard']
         if record['action'] == 'autonomy':
             from .autonomy import configure
             result = configure(runner, command['payload']['enabled'], record['id'], expected=record['guard'],
@@ -469,6 +478,8 @@ def process_v1(runner, state, path, record):
             result = {'state': 'ok'}
             if record['action'] == 'retry':
                 result['prepared'] = _execution_scope(runner, state)
+            if record['action'] == 'resolve-escalation' and data.get('resume') is True:
+                result['delivery'] = 'accepted'
         record.update(status='succeeded', result=result, error=None)
     except WaitingMemory as exc:
         record.update(status='pending', result={'state': 'waiting_memory', 'reason': exc.status['reason']}, error=None)
