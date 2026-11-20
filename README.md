@@ -12,6 +12,40 @@
 
 В командах ниже `team-runner` — установленный CLI. Если его нет в `PATH`, используйте полный путь `/home/talonmortem/repo/team-runner/.venv/bin/team-runner`. `PROJECT_UUID` и `WORKSPACE_UUID` — места для настоящих ID из `project list` и `workspace list`, а не имена проектов или каталогов.
 
+### Каскад агентов из Orca
+
+Каскад запускается из существующей сессии Codex в зарегистрированном checkout. Он использует `Queue.json` v1 с одним пунктом на фичу, максимум одним предшественником и без stage gates. У проекта должно быть `workflow.allow_commits=true`, а роли `coordinator`, `implementer_standard`, `tester` и `final_reviewer` должны быть настроены на совместимый локальный Codex. Каскад создаёт отдельный worktree для каждой готовой фичи. Принятый SHA становится базой её непосредственного преемника.
+
+```sh
+team-runner cascade start --project PROJECT_UUID --workspace WORKSPACE_UUID \
+  --goal PATH_TO_GOAL --execution EXECUTION_UUID --allow-commits
+team-runner cascade resume --execution EXECUTION_UUID
+team-runner cascade reply --execution EXECUTION_UUID --question MESSAGE_ID --answer-file answer.txt
+team-runner cascade accept --execution EXECUTION_UUID --feature FEATURE_ID --dispatch COORDINATOR_DISPATCH
+team-runner cascade stop --project PROJECT_UUID --workspace WORKSPACE_UUID --execution EXECUTION_UUID
+```
+
+Сохраните UUID исполнения. При пробуждении или возвращении к сессии менеджер сначала вызывает `cascade resume`. Координатор использует ту же команду с `--feature` и `--dispatch` из задания. Команда `cascade reply` сохраняет ответ на пересланный вопрос. Последующие вызовы `resume` продолжают доставку по квитанциям. Перед `accept` менеджер сверяет доказательства с замороженной карточкой.
+
+В разделе проверок карточки укажите один блок `cascade-verification` с проверяемыми командами и дополнительными входами. Манифест охватывает Git-дерево. Перечислите используемые игнорируемые файлы и внешние fixtures в `extra_inputs`, а все проверки профиля включите в `checks`.
+
+```cascade-verification
+{
+  "extra_inputs": [],
+  "checks": [
+    {"argv": ["python3", "-m", "unittest"], "cwd": ".", "toolchain": "Python 3.11", "environment": {}}
+  ]
+}
+```
+
+Если сессия менеджера утрачена, владелец локального каталога может добавить `--operator` к команде остановки. Защищённые операции Orca по-прежнему требуют полномочия на точный Run или Dispatch. При неизвестном эффекте аренда checkout сохраняется. После проверки и восстановления нужного полномочия повторите остановку с тем же UUID.
+
+В режиме Bubblewrap Runner до выделения терминала проверяет, что команда внутри sandbox Codex получает отказ при открытии проверяемого входа на запись.
+
+На Linux можно задать `TEAM_RUNNER_CASCADE_VERIFIER_IMAGE` перед `cascade start`. Runner закрепляет ID локального Docker-образа на исполнение и запускает обе роли в контейнерах из терминалов Orca. Образ должен содержать `/usr/local/bin/codex` той же версии, что на хосте, его вспомогательные бинарники, `/usr/bin/python3` и нужный инструментарий. Для [сборки образа AI Story](feat/orca-native-cascade/ai-story-verifier.Dockerfile) положите нативные `codex` и `codex-code-mode-host` одной версии в контекст Docker.
+
+Контейнер монтирует проверяемый снимок и материалы только для чтения. Отчёты, сессия Codex и `CARGO_TARGET_DIR` пишутся в каталог артефактов роли. Для офлайн-запуска Cargo подготовьте зависимости заранее. Режим поддерживает явно заданного локального Codex-провайдера с ключом в переменной окружения. Runner передаёт в контейнер только этот ключ и подключает провайдера через отдельный сокет. Остальная сеть отключена. Координатор выполняет замороженные проверки прежним изолированным путём.
+
 ### Для человека: запуск через браузер
 
 1. Запустите общий UI:

@@ -41,6 +41,8 @@ class _JSONArgumentParser(argparse.ArgumentParser):
 def parser(json_errors=False):
     ap = (_JSONArgumentParser if json_errors else argparse.ArgumentParser)(description=__doc__)
     sub = ap.add_subparsers(dest='cmd', required=True)
+    from .cascade import add_parser as add_cascade_parser
+    add_cascade_parser(sub)
     sub.add_parser('validate-queue').add_argument('goal_dir')
     p = sub.add_parser('artifacts')
     p.add_argument('action', choices=['compact', 'restore', 'sweep', 'prepare'])
@@ -220,6 +222,15 @@ def main(argv=None):
         return 2
     catalog = Catalog()
     try:
+        if args.cmd == 'cascade':
+            from .cascade import execute
+            from .cascade_messages import InboxHistoryGap
+            try:
+                result = execute(args, catalog)
+            except InboxHistoryGap as exc:
+                raise ContractError('inbox_history_gap', str(exc), details=exc.details) from exc
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
         if args.cmd == 'validate-queue':
             from . import queue_plan
             from .verification import digest

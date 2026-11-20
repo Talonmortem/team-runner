@@ -41,7 +41,7 @@ def atomic_json(path, value):
 
 
 @contextmanager
-def lock(path, blocking=True, on_wait=None):
+def lock(path, blocking=True, on_wait=None, *, inherited=False):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('a') as f:
@@ -55,7 +55,10 @@ def lock(path, blocking=True, on_wait=None):
         try:
             yield f.fileno()
         finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+            # Let the last holder close an inherited lock. An interrupted
+            # caller must not unlock while its child still owns the operation.
+            if not inherited:
+                fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def running(state_dir):

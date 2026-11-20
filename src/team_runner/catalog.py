@@ -279,8 +279,10 @@ class Catalog:
             else:
                 w = p['workspaces'].get(identifier(workspace_id))
                 if w is None: raise ValueError('unknown workspace')
-                if ('orca_id' in values or 'orca_instance' in values) and unsettled(self.state_dir(project_id, workspace_id)):
-                    raise ValueError('cannot change Orca address while active or unknown')
+                if 'orca_id' in values or 'orca_instance' in values:
+                    self.require_no_cascade(self.context(project_id, workspace_id, allow_disabled=True))
+                    if unsettled(self.state_dir(project_id, workspace_id)):
+                        raise ValueError('cannot change Orca address while active or unknown')
             if 'profile' in values: profile(values['profile'])
             if 'roles' in values or p['roles'] or w['roles']:
                 roles(values.get('roles', w['roles']), repo=w['path'], config_root=self.config_root.parent,
@@ -305,6 +307,7 @@ class Catalog:
         with lock(self.config_root / 'catalog.lock'):
             context = self.context(project_id, workspace_id, allow_disabled=True)
             with lock(context.checkout_lock, blocking=False):
+                self.require_no_cascade(context)
                 if unsettled(context.state_dir):
                     raise ValueError('active or unknown attempt; reconcile before disabling')
                 data = self.read()
@@ -313,8 +316,14 @@ class Catalog:
                 atomic_json(self.path, data)
                 return w
 
+    def require_no_cascade(self, context):
+        lease = read_json(context.lease_path, {})
+        if lease.get('cascade') is not None:
+            raise ValueError(f"checkout is leased by cascade {lease['cascade']}")
+
     def claim(self, context):
         """Caller holds checkout lock. The durable lease survives process death."""
+        self.require_no_cascade(context)
         previous = read_json(context.lease_path)
         if previous and previous['identity'] != context.identity():
             old = previous['identity']

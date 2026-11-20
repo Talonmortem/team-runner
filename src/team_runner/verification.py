@@ -260,7 +260,7 @@ def fixture_preflight(checkout, paths):
 
 
 def run_check(checkout, manifest, expected, command, toolchain, environment, attempt, output,
-              heavy=False, copy=None):
+              heavy=False, copy=None, *, pass_fds=()):
     from contextlib import nullcontext
     from .heavy_resource import acquire
     preflight = verify(checkout, manifest, expected, copy)
@@ -295,9 +295,10 @@ def run_check(checkout, manifest, expected, command, toolchain, environment, att
         started = time.monotonic()
         log = Path(str(output) + '.log')
         with log.open('xb') as stream:
+            inherited = (*pass_fds, fd) if fd is not None else pass_fds
             proc = subprocess.Popen(command, cwd=copy or checkout, stdout=stream, stderr=subprocess.STDOUT,
                                     env=execution_environment(environment),
-                                    start_new_session=True, pass_fds=(fd,) if fd is not None else ())
+                                    start_new_session=True, pass_fds=inherited)
             if metadata:
                 from .runner_entry import process_stamp
                 resource['processes'].append({'pid': proc.pid, 'stamp': process_stamp(proc.pid)})
