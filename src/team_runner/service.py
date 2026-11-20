@@ -84,8 +84,13 @@ def start_runner(runner, data, *, recovery=False, expected_authorization=None, e
                             and not st.get('recovery_issues'))
             if (st.get('stop_requested') and not restart_idle) or (st.get('current') or {}).get('failed'):
                 raise ValueError('retry stopped/failed attempt first')
-            from .application import start_options
-            options = start_options(runner, effective_data, st)
+            from .application import goals, start_options
+            from .tracking import for_goal
+            from .queue_plan import save_snapshot
+            source = st.get('options') if effective_data == {'resume': True} else effective_data
+            goal = source.get('goal') if isinstance(source, dict) else None
+            queue = for_goal(runner, goal, st) if isinstance(goal, str) and goal in goals(runner) else None
+            options = start_options(runner, effective_data, st, queue=queue)
             if authorization:
                 if authorization['desired_state'] != 'running':
                     raise ValueError('goal authorization cancelled')
@@ -94,13 +99,19 @@ def start_runner(runner, data, *, recovery=False, expected_authorization=None, e
                 elif options != authorization['options']:
                     raise ValueError('launch options differ from authorized policy')
             goal = options['goal']
+            if queue is None:
+                queue = for_goal(runner, goal, st)
             nonce = str(uuid.uuid4())
             with lock(ctx.config_root / 'catalog.lock'):
                 latest = catalog.context(ctx.project_id, ctx.workspace_id)
                 if latest.identity() != ctx.identity(): raise ValueError('workspace identity changed')
                 catalog.claim(ctx)
+                if queue.payload is not None:
+                    save_snapshot(runner, goal, queue.payload)
                 # Start options and exact identity durable before any process/terminal creation.
                 launch = {'nonce': nonce, 'identity': ctx.identity(), 'options': options}
+                if queue.snapshot_sha256 is not None:
+                    launch['queue_sha256'] = queue.snapshot_sha256
                 if authorization:
                     launch['authorization'] = {key: authorization[key] for key in ('generation', 'epoch')}
                 atomic_json(runner.state_dir / 'launch.json', launch)
@@ -186,7 +197,7 @@ def watch_runner_exit(runner, marker_path, nonce):
                 startup['close_evidence'] = proof
                 startup.pop('cleanup_error', None)
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
-            if current:
+            if current and not startup.get('close_evidence'):
                 startup['cleanup_error'] = str(exc)
             runner.log(f'runner terminal cleanup: {exc}')
         if current:
@@ -209,6 +220,7 @@ def watch_runner_exit(runner, marker_path, nonce):
 
 def run_process(runner, nonce):
     from types import SimpleNamespace
+    from .runner_terminal import mark_idle
     ctx = runner.context
     # The checkout lock excludes another executor. A supervisor may briefly own
     # runner.lock while inspecting a departed owner; wait for that inspection.
@@ -242,10 +254,12 @@ def run_process(runner, nonce):
                     runner, authorization['generation'], authorization['epoch']):
                 return 0
             runner.authorization = authorization
+            runner.launch_request = request
             return runner.cmd_run(SimpleNamespace(**defaults)) or 0
         except Exception as exc:
             st = runner.load_state(); st['last_error'] = str(exc); runner.save_state(st)
             raise
         finally:
             st = runner.load_state(); st['runner_status'] = 'idle'; runner.save_state(st)
-            atomic_json(runner.state_dir / 'startup.json', {'status': 'idle', 'nonce': nonce})
+            with lock(runner.state_dir / 'start.lock'):
+                mark_idle(runner.state_dir, nonce)

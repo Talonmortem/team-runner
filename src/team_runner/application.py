@@ -4,7 +4,8 @@ Legacy HTTP names remain aliases; command records retain their existing schema.
 """
 from pathlib import Path
 from .protocol import ContractError, summary, operation
-from .tracking import Tracking
+from . import queue_plan
+from .tracking import for_goal
 from . import runner_config as config
 from .runner_store import atomic_json, enqueue, lock, read_json, running
 
@@ -13,10 +14,17 @@ def goals(runner, *, profile=None):
     repo = runner.repo
     result = []
     profile = runner.attempt_profile() if profile is None else profile
-    for path in sorted((repo / profile['tracking_root']).glob('*/Tasks.json')):
-        data = read_json(path)
+    root = repo / profile['tracking_root']
+    for directory in sorted(root.glob('*/')):
+        if not directory.is_dir() or not directory.resolve().is_relative_to(root.resolve()):
+            continue
+        name = str(directory.relative_to(repo))
+        if ((directory / queue_plan.NAME).is_file() or queue_plan.snapshot_path(runner, name).is_file()):
+            result.append(name)
+            continue
+        data = read_json(directory / 'Tasks.json', {})
         if data.get('kind') == 'goal' or any('path' in q for q in data.get('queue', [])):
-            result.append(str(path.parent.relative_to(repo)))
+            result.append(name)
     return result
 
 
@@ -49,11 +57,17 @@ def state_view(runner):
     annotate_agents(runner.repo, agents['agents'])
     queue = []
     if st.get('goal') in goals(runner, profile=profile):
-        tracking = Tracking(runner.repo / st['goal'])
-        for _, _, data in tracking.features():
-            queue.extend({**item, 'status': 'verification_required'} if item.get('check_scope') == 'stage'
-                         and item.get('status') == 'completed' and not tracking.item_done(item) else item
-                         for item in data.get('queue', []))
+        tracking = for_goal(runner, st['goal'], st)
+        active_key = tracking.canonical(cur.get('item'), strict=False)
+        skipped = {tracking.canonical(key, strict=False) for key in st.get('skipped', [])}
+        for key, _, _, item in tracking.items():
+            status = tracking.item_status(key)
+            if status == 'pending':
+                if key == active_key:
+                    status = 'failed' if cur.get('failed') else 'in_progress'
+                elif key in skipped:
+                    status = 'skipped'
+            queue.append({**item, 'key': key, 'status': status})
     error = st.get('stop_error') or ('stop unconfirmed; inspect Orca resources' if st.get('stop_status') == 'unknown' else None)
     error = (error or st.get('mailbox_cleanup_error')
              or read_json(runner.state_dir / 'startup.json', {}).get('cleanup_error')
@@ -67,7 +81,7 @@ def state_view(runner):
                   for key, op in read_json(path, {}).items() if op['status'] != 'completed']
     from .coordinator_events import view as events_view
     from .verification import view as verification_view
-    active = next((item for item in queue if (cur.get('item') or '').split('/')[-1] == item['id']), {})
+    active = next((item for item in queue if cur.get('item') == item['key']), {})
     from .event_scope import messages as classified_messages
     from .autonomy import view as autonomy_view
     st = dict(st, current=dict(cur, messages=classified_messages(cur, agents))) if cur else st
@@ -96,6 +110,8 @@ def legacy_status_view(runner):
     result["resources"] = runner.launcher.registry(cur["attempt_dir"]) if cur.get("attempt_dir") else None
     from .runner_metrics import annotate_agents
     annotate_agents(runner.repo, (result['resources'] or {}).get('agents', []))
+    if st.get('goal') in goals(runner):
+        result['queue_status'] = for_goal(runner, st['goal'], st).status_index()
     result['settings'] = config.projections(runner.context.settings_dir, st, result['resources'] or {}, runner.context.role_layers,
                                            repo=runner.context.repo, config_root=runner.context.config_root.parent)
     paths = [runner.state_dir / 'operations.json'] + ([runner.launcher.journal(cur['attempt_dir'])] if cur.get('attempt_dir') else [])
@@ -103,7 +119,7 @@ def legacy_status_view(runner):
     return result
 
 
-def start_options(runner, data, state=None):
+def start_options(runner, data, state=None, *, queue=None):
     """Validate explicit launch policy without creating intent or processes."""
     if not isinstance(data, dict):
         raise ValueError('start options must be an object')
@@ -136,7 +152,7 @@ def start_options(runner, data, state=None):
     items = options.get('items')
     if items is not None and not isinstance(items, str):
         raise ValueError('unknown item filter')
-    tracking = Tracking(runner.repo / goal)
+    tracking = queue if queue is not None else for_goal(runner, goal, state)
     if any(tracking.resolve(i) is None for i in (items or '').split(',') if i):
         raise ValueError('unknown item filter')
     runner.load_config(options.get('config'), {k: options.get(k) for k in ('agent', 'profile', 'provider', 'model', 'effort', 'fast')})
@@ -359,7 +375,7 @@ def require_scope(current, scope):
         raise ContractError('stale_scope', 'Command belongs to another generation or attempt')
 
 
-def _submit_v1(runner, command):
+def _submit_v1(runner, command, *, explicit_stop=False):
     """Durably accept a guarded control command; only the runner owner applies it."""
     from .protocol import version, request_id
     import json
@@ -411,13 +427,14 @@ def _submit_v1(runner, command):
     if not running(runner.state_dir):
         try:
             with lock(runner.state_dir / 'runner.lock', blocking=False):
-                runner.process_controls(runner.load_state())
+                runner.process_controls(runner.load_state(),
+                                        explicit_stop_id=identifier if explicit_stop else None)
         except RuntimeError:
             pass  # A live owner will consume the persisted command.
     return operation(runner, identifier)
 
 
-def process_v1(runner, state, path, record):
+def process_v1(runner, state, path, record, *, explicit_stop=False):
     """Called only under runner.lock. Terminal receipts are never rewritten."""
     from .protocol import version
     from .memory_admission import WaitingMemory
@@ -460,6 +477,8 @@ def process_v1(runner, state, path, record):
                 record['stop_guard'] = _execution_scope(runner, state)
                 atomic_json(path, record)
         data = dict(command['payload'], _target=record['guard']['attempt'])
+        if explicit_stop and record['action'] == 'stop':
+            data['_allow_unmarked_mailbox'] = True
         if record['action'] == 'resolve-escalation':
             data['_scope'] = record['guard']
         if record['action'] == 'autonomy':
@@ -518,9 +537,9 @@ def submit_command(runner, action, data, request_id):
         return _submit_command(runner, action, data, identifier)
 
 
-def submit_v1(runner, command):
+def submit_v1(runner, command, *, explicit_stop=False):
     from .protocol import version, request_id
     version(command)
     identifier = request_id(command.get('request_id'))
     with lock(runner.state_dir / 'requests' / (identifier + '.lock')):
-        return _submit_v1(runner, command)
+        return _submit_v1(runner, command, explicit_stop=explicit_stop)

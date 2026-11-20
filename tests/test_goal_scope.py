@@ -21,14 +21,14 @@ class GoalScope(unittest.TestCase):
         self.goal = 'feat/goal-fixture'
         self.feature = self.a.repo / self.goal / 'feat-one/Tasks.json'
         feature = read_json(self.feature)
-        feature['queue'][0]['status'] = 'completed'
+        feature['queue'][0]['status'] = 'in_progress'
         atomic_json(self.feature, feature)
         self.options = {'goal': self.goal, 'items': 'feature/T1', 'mode': 'auto', 'final': False}
         self.old = goal_intent.authorize(self.a, self.options, str(uuid.uuid4()))
         self.previous = goal_intent.read(self.a)
         self.state = {'goal': self.goal, 'options': self.options, 'runner_status': 'idle',
                       'current': None, 'history': [{'item': 'feature/T1', 'outcome': 'succeeded',
-                                                  'problems': []}]}
+                                                  'problems': [], 'dispatch_id': 'accepted-t1'}]}
         self.a.save_state(self.state)
         self.identifier = str(uuid.uuid4())
 
@@ -131,13 +131,11 @@ class GoalScope(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, 'already used'):
             self.prepare()
 
-    def test_old_queue_requires_both_completed_tracking_and_accepted_history(self):
-        for kind in ('tracking', 'history', 'failed', 'problems'):
+    def test_old_queue_requires_accepted_history(self):
+        for kind in ('history', 'failed', 'problems', 'dispatch'):
             with self.subTest(kind=kind):
-                feature = read_json(self.feature)
-                feature['queue'][0]['status'] = 'not_started' if kind == 'tracking' else 'completed'
-                atomic_json(self.feature, feature)
                 state = copy.deepcopy(self.state)
+                if kind == 'dispatch': state['history'][0].pop('dispatch_id')
                 if kind == 'history': state['history'] = []
                 if kind == 'failed': state['history'][0]['outcome'] = 'failed'
                 if kind == 'problems': state['history'][0]['problems'] = ['not accepted']
@@ -176,6 +174,47 @@ class GoalScope(unittest.TestCase):
                      self.a.state_dir / 'execute.lock', self.a.context.checkout_lock):
             with self.subTest(path=path), lock(path), self.assertRaises(RuntimeError):
                 self.prepare()
+
+    def test_retired_launch_receipt_does_not_block_after_newer_runner_exits(self):
+        goal_intent.change(self.a, desired_state='paused')
+        paused = goal_intent.read(self.a)
+        self.old = goal_intent.authorize(self.a, {'resume': True}, str(uuid.uuid4()),
+                                         generation=paused['generation'], epoch=paused['epoch'])
+        generation, epoch = self.old['generation'], self.old['epoch']
+        identity = self.a.context.identity()
+        nonce = str(uuid.uuid4())
+        terminal_key = 'runner-' + nonce
+        launch = {'nonce': nonce, 'identity': identity, 'options': self.options,
+                  'authorization': {'generation': generation, 'epoch': epoch}}
+        unknown_path = goal_execute._shared_path(self.a, generation, epoch - 1, 1)
+        unknown = {'status': 'unknown', 'phase': 'launch', 'identity': identity,
+                   'generation': generation, 'epoch': epoch - 1, 'service_epoch': 1,
+                   'options': self.options}
+        atomic_json(unknown_path, unknown)
+        atomic_json(self.a.state_dir / 'launch.json', launch)
+        (self.a.state_dir / ('launch-' + nonce + '.claim')).touch()
+        startup = {'status': 'idle', 'nonce': nonce, 'close_evidence': {'process': {'pid': 42}}}
+        atomic_json(self.a.state_dir / 'startup.json', startup)
+        journal = self.a.launcher.journal(self.a.state_dir / 'startup')
+        with self.assertRaisesRegex(ContractError, 'previous execute'):
+            self.prepare()
+        atomic_json(journal, {terminal_key + '-close': {
+            'status': 'completed', 'result': startup['close_evidence'],
+            'evidence': {'launch': terminal_key}}})
+        for changed in ({'phase': 'service'}, {'status': 'running'}, {'identity': {}},
+                        {'options': {}}, {'previous_nonce': nonce}):
+            with self.subTest(changed=changed):
+                atomic_json(unknown_path, {**unknown, **changed})
+                with self.assertRaisesRegex(ContractError, 'previous execute'):
+                    self.prepare()
+        atomic_json(unknown_path, unknown)
+        current_path = goal_execute._shared_path(self.a, generation, epoch, 1)
+        atomic_json(current_path, {**unknown, 'epoch': epoch})
+        with self.assertRaisesRegex(ContractError, 'previous execute'):
+            self.prepare()
+        current_path.unlink()
+        self.assertEqual(self.prepare()['desired_state'], 'paused')
+        self.assertEqual(read_json(unknown_path), unknown)
 
     def test_child_and_disabled_workspace_cannot_replace_scope(self):
         with patch.dict(os.environ, {'TEAM_RUNNER_ATTEMPT': '/fixture/attempt'}):

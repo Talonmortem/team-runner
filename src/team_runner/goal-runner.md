@@ -205,8 +205,7 @@ team-runner continue-operation REQUEST_UUID --project PROJECT_UUID --workspace W
 
 Первый пункт запускается сразу; confirm создаёт gate перед следующими. Pause завершает текущий пункт либо сохраняет ожидающий gate. Stop останавливает только зарегистрированные ресурсы. Retry подготавливает новую попытку; запуск/возобновление отдельные. Без `--refresh` retry сохраняет прежние настройки, инструкции и профиль. После трёх попыток нужен разбор задачи.
 
-При `worker_done succeeded` runner отдельно проверяет приёмку: статус `completed`,
-`<goal>/<feature>/<evidence_dir>/<item-id lowercase>/acceptance.md` и требования профиля.
+После `worker_done succeeded` Runner проверяет `<goal>/<feature>/<evidence_dir>/<item-id lowercase>/acceptance.md` и требования профиля. Зависимости открывает успешная запись в `state.json.history`, сохранённая атомарно вместе с очисткой `current`.
 Ошибки приёмки возвращаются координатору до двух раз: новый Task/Dispatch в той же
 подтверждённой сессии и неизменной попытке, с конкретными замечаниями. Старый
 `worker_done` не засчитывается повторно. Это исправление текущего пункта, отдельное
@@ -265,7 +264,7 @@ Browser использует два временных проекта, реал�
 
 SHM migration inventory: `migration/source-manifest.json`. Старое состояние архивируется вне Git с checksum/read-only permissions, не импортируется как исполняемая попытка. Бизнес-правила и исторические отчёты остаются в SHM.
 
-Новые роли: tester_complex (Sol high), final_reviewer_critical и escalation_expert (Opus high). Риск выбирают planner и координатор по MODELS.md. mkspec.py поддерживает --role для совместимого шаблона; отсутствующая роль snapshot отклоняется до записи. Legacy settings v1 загружаются поверх новых defaults; старый полный API payload сохраняет настройки новых ролей. Старые snapshots и материалы не дополняются; изменения действуют только для будущих попыток. Локальный каталог и saved overrides автоматически не мигрируются. Финальная проверка требует полный completed tracking и acceptance-артефакты, commit/clean по профилю.
+Новые роли: tester_complex (Sol high), final_reviewer_critical и escalation_expert (Opus high). Риск выбирают planner и координатор по MODELS.md. mkspec.py поддерживает --role для совместимого шаблона; отсутствующая роль snapshot отклоняется до записи. Legacy settings v1 загружаются поверх новых defaults; старый полный API payload сохраняет настройки новых ролей. Старые snapshots и материалы не дополняются; изменения действуют только для будущих попыток. Локальный каталог и saved overrides автоматически не мигрируются. Финальная проверка требует приёмку всех пунктов в истории и acceptance-артефакты, commit/clean по профилю.
 
 Для вопросов с одинаковым message ID в разных дочерних run передайте `reply --run-id RUN_ID`; в JSON payload поле `run_id` выбирает ровно соответствующий сохранённый вопрос. Без него неоднозначный ID отклоняется.
 

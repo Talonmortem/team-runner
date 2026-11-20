@@ -159,6 +159,62 @@ class Launcher:
     def save_registry(self, attempt, value):
         atomic_json(self.registry_path(attempt), value)
 
+    def recover_coordinator_follow_up(self, attempt, origin, follow_up, operation):
+        """Register an Orca follow-up only while it owns the exact original live terminal."""
+        from .runner_entry import boot_id, process_stamp
+
+        with lock(Path(attempt) / 'agents.lock'):
+            registry = self.registry(attempt)
+            agents = registry['agents']
+            old = next((a for a in agents if a.get('dispatch_id') == origin), None)
+            if (not old or old.get('role') != 'coordinator' or old.get('terminal_closed')
+                    or registry.get('stop_requested')
+                    or any(c.get('status') not in ('completed', 'stopped') for c in registry.get('graph_calls', []))):
+                return
+            existing = next((a for a in agents if a.get('dispatch_id') == follow_up), None)
+            if existing:
+                if old.get('superseded_by') == follow_up and existing.get('follow_up_operation') == operation:
+                    return existing
+                return
+            if old.get('superseded_by') or old.get('status') not in ('active', 'unknown'):
+                return
+            if any(a is not old and a.get('status') not in ('released', 'stopped', 'superseded') for a in agents):
+                return
+            self.check_operations(attempt)
+            journal = read_json(self.journal(attempt), {})
+            terminal_key = old.get('terminal_launch_key', old['id'] + '-terminal')
+            launch = journal.get(terminal_key, {})
+            terminal = (launch.get('result') or {}).get('terminal') or {}
+            marker = operations._launch_marker(launch, self.context.orca_id)
+            if (not marker or marker.get('boot_id') != boot_id()
+                    or process_stamp(marker['pid']) != marker['process_stamp']):
+                return
+            original = self.orca('orchestration', 'worker-show', '--dispatch', origin, mailbox=old.get('mailbox'))
+            data = self.orca('orchestration', 'worker-show', '--dispatch', follow_up, mailbox=old.get('mailbox'))
+            source, target = original.get('dispatch') or {}, data.get('dispatch') or {}
+            observed = data.get('terminal') or {}
+            observation = data.get('observation') or {}
+            process = f"{terminal['ptyId']}:{terminal['incarnationId']}"
+            if (source.get('id') != origin or source.get('taskId') != old['task_id']
+                    or target.get('id') != follow_up or target.get('followUpOf') != origin
+                    or source.get('status') not in ('failed', 'completed') or target.get('status') != 'dispatched'
+                    or not target.get('taskId') or target['taskId'] == old['task_id']
+                    or any(d.get('runId') != old['run_id'] or d.get('assigneeHandle') != old['terminal']
+                           or d.get('processIncarnation') != process for d in (source, target))
+                    or observation.get('status') != 'live' or observation.get('exactWorker') is not True
+                    or any(observed.get(k) != terminal[k] for k in ('handle', 'incarnationId', 'ptyId', 'worktreeId'))):
+                return
+            record = {k: old[k] for k in ('role', 'requested', 'run_id', 'mailbox', 'terminal',
+                                          'terminal_owned', 'incarnation', 'connection_stamp', 'node_id') if k in old}
+            record.update(id=str(uuid.uuid4()), attempt=str(attempt), dispatch_id=follow_up, task_id=target['taskId'],
+                          status='active', reuse=origin, terminal_launch_key=terminal_key,
+                          follow_up_operation=operation)
+            self.verify_terminal(record, data)
+            old.update(status='superseded', superseded_by=follow_up)
+            agents.append(record)
+            self.save_registry(attempt, registry)
+            return record
+
 
     def journal(self, attempt):
         return Path(attempt) / 'operations.json'
@@ -718,7 +774,7 @@ class Launcher:
                 or worker.get('stage') != 'process_exited'
                 or not isinstance(projection, dict) or projection.get('verdict') != 'exited'):
             return False
-        op = read_json(self.journal(attempt), {}).get(record.get('id', '') + '-terminal', {})
+        op = read_json(self.journal(attempt), {}).get(record.get('terminal_launch_key', record.get('id', '') + '-terminal'), {})
         terminal = (op.get('result') or {}).get('terminal') or {}
         incarnation = terminal.get('incarnationId')
         process = f"{terminal.get('ptyId')}:{incarnation}"
@@ -761,7 +817,7 @@ class Launcher:
         if data.get('terminal') is not None:
             return False
         dispatch, worker, resource = (data.get(k) or {} for k in ('dispatch', 'worker', 'terminalResource'))
-        op = read_json(self.journal(attempt), {}).get(record.get('id', '') + '-terminal', {})
+        op = read_json(self.journal(attempt), {}).get(record.get('terminal_launch_key', record.get('id', '') + '-terminal'), {})
         terminal = (op.get('result') or {}).get('terminal') or {}
         incarnation = terminal.get('incarnationId')
         process = f"{terminal.get('ptyId')}:{incarnation}"
@@ -796,9 +852,12 @@ class Launcher:
         return True
 
 
-    def stop_attempt(self, attempt):
+    def stop_attempt(self, attempt, *, allow_unmarked=False):
         with lock(Path(attempt) / 'agents.lock'):
             reg = self.registry(attempt)
+            allow_unmarked = (allow_unmarked and len(reg['runs']) == 1
+                              and all(a.get('status') in ('stopped', 'released', 'superseded')
+                                      for a in reg['agents']))
             reg['fenced'] = True
             reg['stop_requested'] = True
             self.save_registry(attempt, reg)
@@ -918,10 +977,16 @@ class Launcher:
                 try:
                     if not run.get('mailbox') or run.get('status') == 'creating':
                         raise RuntimeError('mailbox creation unconfirmed')
-                    self.close_mailbox(attempt, run)
+                    if allow_unmarked and not (Path(attempt) / 'mailbox.entry.json').exists():
+                        self.check_operations(attempt)
+                        self.context.verify(self.orca)
+                        run['close_evidence'] = operations.close_unmarked_mailbox(
+                            self.journal(attempt), self.orca, run, self.context.orca_id)
+                    else:
+                        self.close_mailbox(attempt, run)
                     run['status'] = 'closed'
                     run.pop('error', None)
-                except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+                except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
                     run['error'] = str(exc)
                     confirmed = False
             if confirmed:

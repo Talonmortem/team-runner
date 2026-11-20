@@ -484,7 +484,7 @@ function renderDetails(v, target) {
     if (!v.queue?.length) node('p','Пункты появятся после выбора и запуска цели.', $('queue'));
     for (const item of v.queue || []) {
       const row = node('div',undefined,$('queue')); row.className = 'queue-row';
-      node('strong',item.id,row); node('span',({completed:'Выполнено',in_progress:'В работе',not_started:'Ожидает',verification_required:'Требуется проверка',skipped:'Пропущено',failed:'Ошибка'})[item.status] || item.status,row); node('span',item.task || '',row);
+      node('strong',item.key || item.id,row); node('span',({pending:'Ожидает приёмки',completed:'Выполнено',in_progress:'В работе',not_started:'Ожидает',verification_required:'Требуется проверка',skipped:'Пропущено',failed:'Ошибка'})[item.status] || item.status,row); node('span',item.task || '',row);
     }
   }
   $('attempts').textContent = JSON.stringify([...(st.attempts || []),...(st.history || [])].map(a => ({item:a.item,attempt:a.attempt,outcome:a.outcome,problems:a.problems,snapshot:a.attempt_dir})),null,2);

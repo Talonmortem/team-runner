@@ -17,7 +17,7 @@ import time
 
 import uuid
 
-from . import memory_admission
+from . import dependency_handoff, memory_admission
 from . import runner_config as config
 
 
@@ -28,7 +28,7 @@ from .runner_store import atomic_json, enqueue, lock, read_json, running
 from pathlib import Path
 
 
-from .tracking import Tracking
+from .tracking import for_goal
 from .runner_launch import Launcher
 WAIT_TYPES = "worker_done,escalation,question"
 FINAL_ID = "GOAL-FINAL-REVIEW"
@@ -112,19 +112,38 @@ class Runner:
 
     def coordinator_spec(self, args, feat, item):
         evidence = Path(args.goal) / feat['path'] / self.attempt_profile()['evidence_dir'] / item['id'].lower() / 'acceptance.md'
+        tracking = for_goal(self, args.goal)
+        key = tracking.key(feat, item)
+        feature_items = [(other, candidate) for other, f, _, candidate in tracking.items() if f['id'] == feat['id']]
+        closes_feature = (not tracking.missing_gate(feat, [candidate for _, candidate in feature_items])
+                          and all(other == key or tracking.item_done(other) for other, _ in feature_items))
+        card = ('Read the frozen task card at $TEAM_RUNNER_ATTEMPT/step-card.md. '
+                f'Original link base: {Path(args.goal) / feat["path"] / item.get("step_card", "")}. '
+                f'Log decisions, blockers and verification links in {Path(args.goal) / feat["path"] / "Progress.md"}.'
+                if tracking.snapshot_sha256 is not None else 'Use the feature plan and Tasks.json for item requirements.')
+        gate_hint = (
+            'For a stage gate, place the manifest, result and logs inside $TEAM_RUNNER_ATTEMPT. '
+            'Write stage-gate.json there with path and manifest relative to the attempt, and sha256 '
+            'from manifest create. Cite stage-gate.json in acceptance.md. Runner writes the acceptance receipt.'
+            if tracking.snapshot_sha256 is not None else
+            'For a legacy stage gate, attach gate_evidence (path, manifest, sha256, accepted) to the item. '
+            'Use an unused absolute accepted path inside the attempt, reserved for Runner.')
+        feature_check = ('This item closes the feature queue. Check all feature criteria and independent evidence. '
+                         'Record the result and links in this item’s acceptance.md before worker_done.'
+                         if closes_feature else 'Preserve the scope of this item while other feature items await acceptance.')
         return f"""Coordinate ONE item: {item['id']} — {item.get('task', '')}.
 Goal: {args.goal}; feature: {feat['path']}. Exact checkout: {self.repo}.
 Read $TEAM_RUNNER_ATTEMPT/context.json and materials/GOAL_MASTER.md first.
 The snapshot includes project instructions, requirements, acceptance, checks and workflow permissions.
+{card}
 This item's check scope is {item.get('check_scope', 'item')}. Run checks with matching scope;
 legacy checks without scope retain their prior semantics. Stage checks run ONLY on a stage gate item.
 Finish independent review and blocker/high fixes BEFORE expensive verification. After FAIL diagnose,
 repair and run targeted checks before a new full gate; never repeat an unchanged failing full run.
 Use team-runner manifest create/verify for frozen inputs and pre/postflight JSON, never manual hashes.
 Use team-runner verification run/reuse to record exact inputs, toolchain, non-secret environment and logs.
-Stage gate evidence must be attached to the item as gate_evidence (path, manifest, sha256, accepted), with
-accepted an absolute unused path under the current attempt, written only by runner acceptance, and
-manifest roots exactly gate_roots. A missing/stale/failed gate blocks the following stage.
+{gate_hint}
+Manifest roots must match gate_roots. A missing, stale or failed gate blocks the following stage.
 Project instructions take priority over shared rules. Role settings: $TEAM_RUNNER_ATTEMPT/config.json.
 Read auto_continue_after_replan from that immutable config (missing means false).
 If true, a failed expert repair cycle requires a saved revised plan followed by continued repair
@@ -139,27 +158,29 @@ Child sessions close after accepted worker_done unless launched with --keep-sess
 Reuse requires prior --keep-session plus explicit --function ID --reuse DISPATCH --context-percent MEASURED_PERCENT <=50,
 same attempt/role/function/settings/connection. Reviewer always fresh. Never guess context usage.
 Store specs/reports under $TEAM_RUNNER_ATTEMPT. Do not launch other goals or alter branches.
-Update Tasks.json and evidence following snapshot acceptance. Commit only if workflow permits it.
+Write the acceptance report with verification evidence. Commit only if workflow permits it.
 If the snapshot enables workflow.commit_after_review, follow the per-item commit gate in GOAL_MASTER.md.
-If accepting this item completes the feature's entire queue, settle feature acceptance BEFORE worker_done.
-A completed queue alone is not feature acceptance. Check all feature criteria and required independent evidence;
-within delegated authority, record feature acceptance and update both feature and goal tracking consistently.
+{feature_check}
 Ask an external owner only when project instructions or an existing user decision explicitly require
 that owner's approval at this exact scope. Track/feature/goal approval is not an item approval gate.
 Do not create an extra ROOT approval gate in a generated card. Preserve explicit project approval gates;
 when one applies, cite its source and obtain the real decision in this attempt before reporting succeeded.
-Preserve item scope while other feature items remain. Do not rerun unchanged expensive checks merely to close tracking.
-Runner acceptance requires queue status exactly completed and evidence at {evidence}.
+Runner acceptance requires evidence at {evidence}.
 After worker_done, keep this session available: runner may dispatch acceptance corrections here.
 Questions and worker_done use the exact injected preamble. After coordinator acceptance and all required
-external approvals, send worker_done succeeded with completed tracking and evidence. Runner then performs
+external approvals, send worker_done succeeded and cite the evidence. Runner then performs
 formal acceptance via finish_item; do not wait for a Runner acceptance receipt before worker_done.
 Optional handoff: {args.handoff or 'none'}.
 """
 
     def final_spec(self, args):
+        from .queue_plan import snapshot_path
+
+        snapshot = snapshot_path(self, args.goal)
+        queue = f'Use the saved queue and card texts at {snapshot}.' if snapshot.is_file() else ''
         return f"""Final review of {args.goal} in {self.repo}.
 Read $TEAM_RUNNER_ATTEMPT/context.json, config.json and materials/GOAL_MASTER.md.
+{queue}
 Use completion_checker for formal tracking/report/version checks only, without rerunning the full test suite.
 Use a fresh final_reviewer or final_reviewer_critical according to approved risk in materials/MODELS.md
 through team-runner launch; preserve the existing review cadence and tester's frozen manifest.
@@ -171,28 +192,32 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
 
     def verify_item(self, args, item_id, start_head, dirty_before):
         problems = []
-        tr = Tracking(self.repo / args.goal)
+        tr = for_goal(self, args.goal)
         found = tr.find(item_id)
         if found is None:
             return [f"{item_id} не найден в трекинге"]
-        feat, tracking_path, t = found
-        if t["status"] != "completed":
-            problems.append(f"Tasks.json: статус {item_id} = {t['status']}, ожидался completed")
+        feat, _, t = found
         current = self.load_state().get('current') or {}
         frozen = read_json(Path(current['attempt_dir']) / 'item-contract.json', {}) if current.get('attempt_dir') else {}
-        if frozen.get('check_scope') == 'stage' and any(t.get(k) != value for k, value in frozen.items()):
-            problems.append('stage gate contract changed after dispatch')
+        if self.item_contract_changed(tr, feat, t, frozen):
+            problems.append('item contract changed after dispatch')
         if t.get('check_scope') == 'stage':
             stage_checks = [c for c in self.attempt_profile()['checks'] if c.get('scope') == 'stage']
             if not frozen or stage_checks != [{'cwd': '.', 'argv': t.get('gate_command'), 'scope': 'stage'}]:
                 problems.append('stage gate command must match the frozen profile stage harness')
             from .verification import gate_valid
-            if not gate_valid(self.repo, t, current=True):
-                problems.append('stage gate evidence missing, failed or stale')
+            try:
+                candidate, scope = self.stage_candidate(tr, t, current)
+                if not gate_valid(self.repo, candidate, current=True, **scope):
+                    raise ValueError('failed or stale evidence')
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+                problems.append('stage gate evidence missing, failed or stale: ' + str(exc))
         profile = self.attempt_profile()
         acc = Path(args.goal) / feat["path"] / profile["evidence_dir"] / t["id"].lower() / "acceptance.md"
         if not (self.repo / acc).is_file() or (profile["acceptance"]["require_commit"] and not self.git("ls-files", str(acc)).strip()):
             problems.append(f"нет закоммиченного {acc}" if profile['acceptance']['require_commit'] else f"нет файла {acc}")
+        if not (self.repo / acc).resolve().is_relative_to(tr.goal_dir):
+            problems.append(f'acceptance artifact escapes goal directory: {acc}')
         head = self.git("rev-parse", "HEAD").strip()
         if profile['workflow'].get('commit_after_review'):
             attempt = current.get('attempt_dir')
@@ -210,12 +235,6 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 if (not self.git('--literal-pathspecs', 'ls-tree', '--name-only', head, '--', str(acc)).strip()
                         or self.git('--literal-pathspecs', 'diff', '--name-only', head, '--', str(acc)).strip()):
                     problems.append(f'item acceptance evidence must match the item commit: {acc}')
-                try:
-                    committed = json.loads(self.git('show', f'{head}:{tracking_path.relative_to(self.repo)}'))
-                    if not any(row['id'] == t['id'] and row['status'] == 'completed' for row in committed['queue']):
-                        raise ValueError('item is not completed')
-                except (subprocess.CalledProcessError, KeyError, TypeError, ValueError):
-                    problems.append(f'item completion must be recorded in the item commit: {tracking_path}')
         if profile["acceptance"]["require_commit"] and head == start_head:
             problems.append("нет новых коммитов с начала пункта")
         new_dirty = [p for p in self.dirty_paths() if p not in dirty_before]
@@ -243,24 +262,16 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         valid = accepted_artifact(report)
         problems = [] if valid else [f"missing accepted report: {report}"]
         try:
-            tr = Tracking(self.repo / args.goal)
+            tr = for_goal(self, args.goal)
             if not isinstance(tr.goal['queue'], list):
                 raise ValueError('goal queue must be a list')
             features = list(tr.features())
-            present = {path for _, path, _ in features}
-            for feat in tr.goal['queue']:
-                path = (tr.goal_dir / feat['path'] / 'Tasks.json').resolve()
-                if path not in present:
-                    problems.append(f"missing feature tracking: {path}")
-                if feat['status'] != 'completed' or not tr.feature_done(feat['id']):
-                    problems.append(f"feature {feat['id']}: expected completed")
+            problems.extend(tr.blocked_report())
             for feat, _, data in features:
                 queue = data['queue']
                 if not isinstance(queue, list):
                     raise ValueError(f"feature {feat['id']}: queue must be a list")
                 for item in queue:
-                    if not tr.item_done(item):
-                        problems.append(f"{tr.key(feat, item)}: expected completed")
                     artifact = (tr.goal_dir / feat['path'] / profile['evidence_dir'] /
                                 item['id'].lower() / 'acceptance.md').resolve()
                     if not artifact.is_relative_to(tr.goal_dir):
@@ -418,6 +429,11 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
 
     def start_coordinator(self, args, st, item_id, spec, title):
         cur = st.get("current")
+        handoff = st.get('deferred_items', {}).get(item_id)
+        tracking = None
+        if handoff:
+            tracking = for_goal(self, args.goal)
+            dependency_handoff.require_predecessor(tracking, st, item_id)
         if not cur or cur.get("item") != item_id:
             if st.get('recovery_issues') or st.get('last_error'):
                 previous = cur or (st.get('history') or [{}])[-1]
@@ -428,6 +444,8 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 st.pop('last_error', None)
             cur = {"item": item_id, "start_head": self.git("rev-parse", "HEAD").strip(), "attempt": 1,
                    "dirty_before": self.dirty_paths(), "started_at": dt.datetime.now().isoformat(timespec="seconds")}
+            if handoff:
+                cur.update(attempt=handoff['attempt'], deferred_from=handoff['attempt_dir'])
             st["current"] = cur
         if not cur.get("dispatch_id") and not cur.get("attempt_dir"):
             attempt = self.state_dir / "attempts" / str(uuid.uuid4())
@@ -442,11 +460,18 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 atomic_json(attempt / 'context.json', read_json(Path(previous) / 'context.json'))
             else:
                 self.context.snapshot(attempt)
-            if getattr(args, 'goal', None) and (self.repo / args.goal / 'Tasks.json').is_file():
-                found = Tracking(self.repo / args.goal).find(item_id)
-                if found and found[2].get('check_scope') == 'stage':
-                    atomic_json(attempt / 'item-contract.json', {k: found[2].get(k) for k in
-                                ('check_scope', 'gate_roots', 'gate_command', 'depends_on')})
+            if getattr(args, 'goal', None) and item_id != FINAL_ID:
+                tracking = tracking or for_goal(self, args.goal, st)
+                found = tracking.resolve(item_id, strict=False)
+                if found:
+                    key, feat, _, item = found
+                    contract = {'depends_on': item.get('depends_on', []), 'contract': tracking.contract(feat, item)}
+                    if item.get('check_scope') == 'stage':
+                        contract.update({key: item.get(key) for key in ('check_scope', 'gate_roots', 'gate_command')})
+                    atomic_json(attempt / 'item-contract.json', contract)
+                    card = tracking.card(key)
+                    if card is not None:
+                        (attempt / 'step-card.md').write_text(card, encoding='utf-8')
             atomic_json(attempt / "config.json", snapshot)
             cur["attempt_dir"] = str(attempt)
             cur["requested"] = config.snapshot_role(attempt, "coordinator")
@@ -464,7 +489,7 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                          'Fresh child sessions; no --reuse or --keep-session.\nRoot instructions:\n' +
                          node(frozen, frozen['root'])['instructions'])
             spec += "\nRead $TEAM_RUNNER_ATTEMPT/config.json before work. It is the authoritative role snapshot, including on retries."
-        if not cur.get("task_id") and (cur.get("attempt", 1) > 1 or cur.get('attempt_reset')):
+        if not cur.get("task_id") and not cur.get('deferred_from') and (cur.get("attempt", 1) > 1 or cur.get('attempt_reset')):
             spec += (f"\nЭто ПОПЫТКА {cur['attempt']}: прошлый координатор ({cur.get('previous_dispatch')}) прервался. "
                      "Обязательно выполни шаг 2 (продолжение прошлой попытки).\n")
             title += f" (attempt {cur['attempt']})"
@@ -504,6 +529,8 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                     if not permitted():
                         raise memory_admission.AdmissionCancelled('coordinator launch cancelled')
                     if not cur.get('dispatch_id'):
+                        if handoff:
+                            dependency_handoff.require_predecessor(for_goal(self, args.goal), st, item_id)
                         self.coordinator_task(st, cur, spec, title)
                         with self.launch_permission():
                             record = self.launcher.launch(attempt, "coordinator", cur["task_id"], st["run_id"], title,
@@ -629,6 +656,29 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 return done
 
 
+    @staticmethod
+    def item_contract_changed(tracking, feat, item, contract):
+        if 'contract' in contract:
+            return tracking.contract(feat, item) != contract['contract']
+        if contract.get('check_scope') != 'stage':
+            return False
+        return any(item.get(key, [] if key == 'depends_on' and value == [] else None) != value
+                   for key, value in contract.items())
+
+    def stage_candidate(self, tracking, item, current):
+        from .verification import attempt_gate
+
+        attempt_dir = Path(current['attempt_dir'])
+        attempt = attempt_dir.resolve(strict=True)
+        if attempt.parent != (self.state_dir / 'attempts').resolve() or attempt_dir != attempt:
+            raise ValueError('stage gate requires an owned attempt')
+        if tracking.snapshot_sha256 is not None:
+            return dict(item, gate_evidence=attempt_gate(attempt)), {'attempt': attempt}
+        receipt = Path(item['gate_evidence']['accepted'])
+        if not receipt.is_absolute() or not receipt.resolve().is_relative_to(attempt):
+            raise ValueError('stage acceptance receipt must stay in current attempt')
+        return item, {}
+
     def finish_item(self, args, st, done, verify):
         cur = st["current"]
         final_fingerprint = None
@@ -636,8 +686,8 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         if cur['item'] == FINAL_ID:
             from .goal_completion import tracking_fingerprint, source_proof
             try:
-                final_fingerprint = tracking_fingerprint(self, args.goal)
-                final_source = source_proof(self, args.goal)
+                final_fingerprint = tracking_fingerprint(self, args.goal, st)
+                final_source = source_proof(self, args.goal, st)
             except (OSError, ValueError, KeyError, TypeError):
                 pass
         problems = verify() if done["outcome"] == "succeeded" else [f"outcome={done['outcome']}"]
@@ -672,36 +722,40 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                         coordinator['cleanup_error'] = str(exc)
                         problems.append(str(exc))
                     self.launcher.save_registry(cur["attempt_dir"], reg)
-        if not problems and getattr(args, 'goal', None) and (self.repo / args.goal / 'Tasks.json').is_file():
-            try:
-                found = Tracking(self.repo / args.goal).find(cur['item'])
-                item = found[2] if found else {}
-                contract = read_json(Path(cur['attempt_dir']) / 'item-contract.json', {}) if cur.get('attempt_dir') else {}
-                if contract.get('check_scope') == 'stage' and any(item.get(k) != value for k, value in contract.items()):
-                    raise ValueError('stage gate contract changed before acceptance')
-                if item.get('check_scope') == 'stage':
-                    from .verification import accept_gate
-                    receipt = Path(item['gate_evidence']['accepted'])
-                    attempt = Path(cur['attempt_dir']).resolve()
-                    if not receipt.is_absolute() or not receipt.resolve().is_relative_to(attempt):
-                        raise ValueError('stage acceptance receipt must stay in current attempt')
-                    accept_gate(self.repo, item)
-            except (OSError, ValueError, KeyError, TypeError) as exc:
-                problems.append('stage acceptance: ' + str(exc))
         entry = {**cur,
                  "finished_at": dt.datetime.now().isoformat(timespec="seconds"),
                  "outcome": done["outcome"], "summary": done["body"], "problems": problems,
                  "head": self.git("rev-parse", "HEAD").strip()}
+        if not problems and getattr(args, 'goal', None) and cur['item'] != FINAL_ID:
+            try:
+                tracking = for_goal(self, args.goal, st)
+                key, feat, _, item = tracking.resolve(cur['item'], strict=False)
+                frozen = read_json(Path(cur['attempt_dir']) / 'item-contract.json', {}) if cur.get('attempt_dir') else {}
+                if not cur.get('dispatch_id') or self.item_contract_changed(tracking, feat, item, frozen):
+                    raise ValueError('missing Dispatch or item contract changed before acceptance')
+                if item.get('check_scope') == 'stage':
+                    from .verification import accept_gate
+                    candidate, scope = self.stage_candidate(tracking, item, cur)
+                    receipt = accept_gate(self.repo, candidate, **scope)
+                    entry['stage_evidence'] = candidate['gate_evidence']
+                    if scope:
+                        entry['stage_evidence'] = {**entry['stage_evidence'], 'evidence_sha256': receipt['evidence']}
+                attempt_id = cur.get('snapshot_id')
+                if not attempt_id:
+                    attempt_id = Path(cur['attempt_dir']).name if cur.get('attempt_dir') else cur['dispatch_id']
+                entry.update(item=key, item_contract=tracking.contract(feat, item), attempt_id=attempt_id)
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError, AttributeError) as exc:
+                problems.append('item acceptance: ' + str(exc))
         if cur['item'] == FINAL_ID and not problems:
             from .goal_completion import tracking_fingerprint, source_proof
             from .goal_intent import read as read_intent
             intent = read_intent(self)
             if intent:
                 try:
-                    entry['tracking_fingerprint'] = tracking_fingerprint(self, args.goal)
+                    entry['tracking_fingerprint'] = tracking_fingerprint(self, args.goal, st)
                     if entry['tracking_fingerprint'] != final_fingerprint:
                         raise ValueError('tracking changed during final acceptance')
-                    entry['source_proof'] = source_proof(self, args.goal)
+                    entry['source_proof'] = source_proof(self, args.goal, st)
                     if entry['source_proof'] != final_source:
                         raise ValueError('source or acceptance artifacts changed during final acceptance')
                     entry['completion_generation'] = intent['generation']
@@ -709,6 +763,10 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                     problems.append('goal tracking, source or acceptance artifacts changed before final acceptance was saved')
         st["history"].append(entry)
         st["current"] = cur if problems else None
+        if not problems and 'deferred_items' in st:
+            st['deferred_items'].pop(cur['item'], None)
+            if not st['deferred_items']:
+                st.pop('deferred_items')
         if problems:
             cur["failed"] = True
             cur["problems"] = list(problems)
@@ -718,7 +776,9 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                     'dispatch_id': cur['dispatch_id'], 'problems': list(acceptance_problems),
                 }
                 cur.pop('failed', None)
+        operations.checkpoint('acceptance:before_save')
         self.save_state(st)
+        operations.checkpoint('acceptance:after_save')
         print(f"\n=== {entry['item']}: {done['outcome']} ===\n{done['body']}\n", flush=True)
         if problems:
             self.notify(f"{entry['item']} НЕ принят runner'ом", "; ".join(problems))
@@ -790,18 +850,26 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         if not (st.get('current') or {}).get('attempt_dir'):
             self.load_config(args.config, {k: getattr(args, k, None) for k in config.FIELDS | {'fast'}})
         goal_path = (self.repo / args.goal).resolve()
-        if not goal_path.is_relative_to((self.repo / self.attempt_profile()["tracking_root"]).resolve()) or not (goal_path / "Tasks.json").is_file():
+        if not goal_path.is_relative_to((self.repo / self.attempt_profile()["tracking_root"]).resolve()):
             raise ValueError("goal must reference existing tracking under profile.tracking_root")
+        names = for_goal(self, args.goal, st)
+        launch = getattr(self, 'launch_request', None)
+        if (launch or {}).get('queue_sha256') != names.snapshot_sha256:
+            raise ValueError('queue snapshot does not match the saved Runner launch')
+        if st.get('deferred_items'):
+            dependency_handoff.check_queue(names, st)
         st["goal"] = args.goal
+        if names.snapshot_sha256 is not None:
+            st['queue_sha256'] = names.snapshot_sha256
         if args.config:
             args.config = str(Path(args.config).expanduser().resolve())
         st["options"] = {k: v for k, v in vars(args).items() if k not in ("func", "cmd") and not (k == "fast" and v is None)}
         st["paused"] = False
         st["runner_status"] = "running"
         st.pop("last_error", None)
+        st.pop("queue_blocked", None)
         self.save_state(st)
         run_id = self.ensure_run(st)
-        names = Tracking(self.repo / args.goal)
         only = {names.canonical(i) for i in args.items.split(",") if i} if args.items else None
         self.log(f"runner: goal={args.goal} run={run_id} mode={args.mode} items={args.items or 'auto'} model={args.model}")
         skipped = {names.canonical(i, strict=False) for i in st.get("skipped", [])}
@@ -809,7 +877,8 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             self.process_controls(st)
             if st.get("control_uncertain") or st.get("stop_requested") or (st.get("paused") and not st.get("current")):
                 return 0
-            tr = Tracking(self.repo / args.goal)
+            tr = for_goal(self, args.goal, st)
+            dependency_handoff.check_queue(tr, st)
             cur = st.get("current")
             if cur and cur.get('acceptance_rework'):
                 if not self.rework_acceptance(st):
@@ -819,6 +888,12 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             else:
                 nxt = tr.next_item(only, skipped)
                 if nxt is None:
+                    blockers = tr.blocked_report(None if args.final else only, skipped)
+                    if blockers:
+                        st['queue_blocked'] = blockers
+                        self.save_state(st)
+                        self.notify('очередь ждёт приёмки', '; '.join(blockers))
+                        return 1
                     last = st['history'][-1] if st['history'] else {}
                     final_accepted = last.get('item') == FINAL_ID and not last.get('problems')
                     if final_accepted and intent:
@@ -826,8 +901,8 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                         try:
                             final_accepted = (last.get('outcome') == 'succeeded'
                                               and last.get('completion_generation') == intent['generation']
-                                              and last.get('tracking_fingerprint') == tracking_fingerprint(self, args.goal)
-                                              and last.get('source_proof') == source_proof(self, args.goal))
+                                              and last.get('tracking_fingerprint') == tracking_fingerprint(self, args.goal, st)
+                                              and last.get('source_proof') == source_proof(self, args.goal, st))
                         except (OSError, ValueError, KeyError, TypeError):
                             final_accepted = False
                     if args.final and not final_accepted:
@@ -835,8 +910,7 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                     else:
                         from .goal_completion import record
                         record(self, st)
-                        blocked = tr.blocked_report()
-                        self.notify("очередь пуста", "ждут решения пользователя: " + ", ".join(blocked) if blocked else "")
+                        self.notify("очередь пуста")
                         return 0
                 else:
                     item_id = tr.key(nxt[0], nxt[2])
@@ -869,7 +943,7 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 return 1
             if only is not None:
                 only.discard(names.canonical(item_id, strict=False))
-                if not only and not args.final:
+                if not only and not args.final and not st.get('deferred_items'):
                     from .goal_completion import record
                     record(self, st)
                     self.notify("заданные пункты выполнены")
@@ -1447,7 +1521,14 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                 if cur.get('dispatch_id') and not any(a.get('dispatch_id') == cur['dispatch_id'] for a in reg['agents']):
                     st['stop_status'] = 'unknown'
                     raise ValueError('current Dispatch missing from ownership registry; reconcile first')
-                st['stop_status'] = 'stopped' if self.launcher.stop_attempt(cur['attempt_dir']) else 'unknown'
+                allow_unmarked = False
+                if data.get('_allow_unmarked_mailbox'):
+                    from .recovery import _unknown
+                    startup = read_json(self.state_dir / 'startup.json', {})
+                    allow_unmarked = (not _unknown(self, st) and not st.get('recovery_issues')
+                                      and startup.get('status') not in ('starting', 'unknown'))
+                stopped = self.launcher.stop_attempt(cur['attempt_dir'], allow_unmarked=allow_unmarked)
+                st['stop_status'] = 'stopped' if stopped else 'unknown'
                 if st['stop_status'] != 'stopped':
                     reg = self.launcher.registry(cur['attempt_dir'])
                     errors = [f"{r.get('role') or r.get('run_id') or 'resource'}: {r['error']}"
@@ -1598,13 +1679,41 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             agent = escalation_agent(registry, matches[0])
             if not agent or op.get('args') != self.escalation_args(agent, data['text']):
                 return False
-            operations.check_dispatch_message(op.get('result') or {}, agent, op.get('request_id'))
+            operations.check_escalation_receipt(op, op.get('result') or {})
         except (ValueError, operations.UncertainOperation):
             return False
         if not matches[0].get('closed'):
             self.close_escalation(matches[0], identifier, data['text'], delivered=True)
         resolution = matches[0].get('resolution') or {}
         return resolution.get('request_id') == identifier and resolution.get('delivery') == 'accepted'
+
+    def recover_escalation_follow_up(self, st, journal_path):
+        from .application import _execution_scope
+        from .goal_intent import read
+
+        cur = st['current']
+        if st.get('paused') or st.get('stop_requested') or cur.get('failed') or not cur.get('dispatch_id'):
+            return
+        scope = _execution_scope(self, st)
+        journal = read_json(journal_path, {})
+        prefix = 'escalation-resume:'
+        candidates = [(key.removeprefix(prefix), op) for key, op in journal.items()
+                      if key.startswith(prefix) and op.get('status') == 'completed'
+                      and op.get('confirmed_follow_up') and op['args'][5] == 'dispatch:' + cur['dispatch_id']
+                      and (op.get('evidence') or {}).get('scope') == scope]
+        if len(candidates) != 1:
+            return
+        identifier, op = candidates[0]
+        with lock(self.state_dir / 'goal-intent.lock'):
+            if read(self).get('desired_state') != 'running' or _execution_scope(self, st) != scope:
+                return
+            command = read_json(self.state_dir / 'commands' / (identifier + '.json'), {})
+            if not self.reconcile_escalation_delivery(st, identifier, command, op, scope):
+                return
+            self.launcher.recover_coordinator_follow_up(
+                cur['attempt_dir'], cur['dispatch_id'], op['confirmed_follow_up'], identifier)
+            if st.get('control_uncertain') == identifier:
+                st.pop('control_uncertain')
 
 
     def reconcile_reply(self, st, identifier, command, journal):
@@ -1701,6 +1810,11 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
                     # All creation receipts proved, no process owns runner.lock.
                     atomic_json(self.state_dir / 'startup.json', dict(startup, status='idle'))
         if cur.get('attempt_dir'):
+            if not technical_only and not issues:
+                try:
+                    self.recover_escalation_follow_up(st, paths[0])
+                except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+                    issues.append('coordinator follow-up: ' + str(exc))
             recovery_args = {'accepted_reports': self.accepted_child_reports(cur['attempt_dir'])}
             issues += self.launcher.reconcile_attempt(cur['attempt_dir'], request_id if request_id and path != paths[0] else None, **recovery_args)
             if not technical_only:
@@ -1719,6 +1833,8 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
             coordinator = next((a for a in reg['agents'] if a.get('role') == 'coordinator' and a.get('status') == 'active'), None)
             if coordinator:
                 cur.update(dispatch_id=coordinator['dispatch_id'], terminal=coordinator['terminal'])
+                if coordinator.get('follow_up_operation'):
+                    cur['task_id'] = coordinator['task_id']
         elif cur.get('dispatch_id'):
             issues.append('legacy attempt lacks ownership evidence; recovery blocked')
         journal = read_json(paths[0], {})
@@ -1875,12 +1991,12 @@ Respect workflow permissions; no production edits. Report gaps and checks, then 
         self.save_state(st)
 
 
-    def process_controls(self, st):
+    def process_controls(self, st, *, explicit_stop_id=None):
         for path in sorted((self.state_dir / 'commands').glob('*.json'), key=lambda p: p.stat().st_mtime_ns):
             rec = read_json(path)
             if 'schema_version' in rec:
                 from .application import process_v1
-                process_v1(self, st, path, rec)
+                process_v1(self, st, path, rec, explicit_stop=rec['id'] == explicit_stop_id)
                 continue
             if rec['id'] in st.get('applied_commands', []):
                 rec.update(status='done')

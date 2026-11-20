@@ -144,6 +144,8 @@ def authorize(runner, options, identifier, *, generation=None, epoch=None, befor
     path = runner.state_dir / 'goal-intent.json'
     with lock(runner.state_dir / 'goal-intent.lock'):
         previous = read(runner)
+        from .goal_scope import require_no_pending_handoff
+        require_no_pending_handoff(runner, previous)
         receipts = previous.get('requests', {})
         if identifier in receipts:
             receipt = receipts[identifier]
@@ -192,6 +194,10 @@ def authorize(runner, options, identifier, *, generation=None, epoch=None, befor
                      'originating_request_id': identifier, 'initial_options': options, 'requests': {}}
         result = {'schema_version': 1, 'generation': value['generation'], 'epoch': value['epoch'],
                   'goal': value['goal'], 'request_id': identifier, 'status': 'authorized'}
+        if resume and state.get('deferred_items'):
+            from .dependency_handoff import check_queue
+            from .tracking import for_goal
+            check_queue(for_goal(runner, value['goal'], state), state)
         value['requests'][identifier] = {'request': request, 'result': result}
         validate(runner, value)
         if before_commit is not None:
@@ -210,6 +216,8 @@ def change(runner, *, desired_state=None, recovery=None, generation=None, epoch=
         value = read(runner)
         if not value:
             return None
+        from .goal_scope import require_no_pending_handoff
+        require_no_pending_handoff(runner, value)
         if generation is not None and generation != value['generation'] or epoch is not None and epoch != value['epoch']:
             raise ContractError('stale_scope', 'Goal authorization changed')
         changed = False

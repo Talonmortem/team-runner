@@ -41,6 +41,7 @@ class _JSONArgumentParser(argparse.ArgumentParser):
 def parser(json_errors=False):
     ap = (_JSONArgumentParser if json_errors else argparse.ArgumentParser)(description=__doc__)
     sub = ap.add_subparsers(dest='cmd', required=True)
+    sub.add_parser('validate-queue').add_argument('goal_dir')
     p = sub.add_parser('artifacts')
     p.add_argument('action', choices=['compact', 'restore', 'sweep', 'prepare'])
     p.add_argument('--project'); p.add_argument('--workspace')
@@ -117,10 +118,11 @@ def parser(json_errors=False):
         p.add_argument('--project'); p.add_argument('--workspace'); p.add_argument('--name'); p.add_argument('--path')
         p.add_argument('--orca-id'); p.add_argument('--orca-instance'); p.add_argument('--profile-file'); p.add_argument('--roles-file')
         if command == 'project': p.add_argument('--service-port', type=int)
-    for command in ('execute','run','status','operation','goals','command','pause','stop','retry','reconcile','continue-operation','reply','resolve','launch','delegate','messages','_runner','prepare-scope'):
+    scope_commands = ('prepare-scope', 'prepare-dependency-handoff')
+    for command in ('execute','run','status','operation','goals','command','pause','stop','retry','reconcile','continue-operation','reply','resolve','launch','delegate','messages','_runner', *scope_commands):
         p = sub.add_parser(command)
-        p.add_argument('--project', required=command in ('execute', 'prepare-scope')); p.add_argument('--workspace', required=command in ('execute', 'prepare-scope'))
-        if command in ('status', 'operation', 'goals', 'command', 'messages', 'pause', 'stop', 'retry', 'reconcile', 'continue-operation', 'reply', 'resolve', 'prepare-scope'):
+        p.add_argument('--project', required=command in ('execute', *scope_commands)); p.add_argument('--workspace', required=command in ('execute', *scope_commands))
+        if command in ('status', 'operation', 'goals', 'command', 'messages', 'pause', 'stop', 'retry', 'reconcile', 'continue-operation', 'reply', 'resolve', *scope_commands):
             p.add_argument('--json', action='store_true')
         if command in ('pause', 'stop', 'retry', 'reconcile', 'continue-operation', 'reply', 'resolve'):
             p.add_argument('--generation', help='observed generation, or null')
@@ -145,11 +147,17 @@ def parser(json_errors=False):
             recovery = p.add_mutually_exclusive_group()
             recovery.add_argument('--recovery', action='store_true', default=None)
             recovery.add_argument('--no-recovery', dest='recovery', action='store_false')
-        if command == 'prepare-scope':
-            p.add_argument('--request-id', required=True)
+        if command in scope_commands:
+            p.add_argument('--request-id', required=command == 'prepare-scope')
             p.add_argument('--generation', required=True)
             p.add_argument('--epoch', type=int, required=True)
+        if command == 'prepare-scope':
             p.add_argument('--items', required=True)
+        if command == 'prepare-dependency-handoff':
+            p.add_argument('--attempt', required=True)
+            p.add_argument('--revision', required=True)
+            p.add_argument('--predecessor', required=True)
+            p.add_argument('--dry-run', action='store_true')
         if command in ('run', 'pause', 'stop', 'retry', 'reconcile', 'continue-operation', 'reply', 'resolve'):
             p.add_argument('--request-id')
         if command in ('run', 'execute'):
@@ -212,6 +220,13 @@ def main(argv=None):
         return 2
     catalog = Catalog()
     try:
+        if args.cmd == 'validate-queue':
+            from . import queue_plan
+            from .verification import digest
+            payload = queue_plan.read(args.goal_dir)
+            print(json.dumps({'schema_version': 1, 'result': 'PASS', 'sha256': digest(payload),
+                              'items': list(payload['cards'])}, ensure_ascii=False))
+            return 0
         if args.cmd in ('manifest', 'verification'):
             from . import verification as verification
             if args.cmd == 'manifest':
@@ -400,6 +415,13 @@ def main(argv=None):
                              generation=args.generation, epoch=args.epoch)
             print(json.dumps(result, ensure_ascii=False))
             return 0
+        if args.cmd == 'prepare-dependency-handoff':
+            from .goal_scope import prepare_dependency_handoff
+            result = prepare_dependency_handoff(
+                runner, args.predecessor, args.request_id, generation=args.generation,
+                epoch=args.epoch, attempt=args.attempt, revision=args.revision, dry_run=args.dry_run)
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
         if args.cmd == 'execute':
             from .application import execute
             options = {key: value for key, value in vars(args).items()
@@ -477,7 +499,8 @@ def main(argv=None):
                                     'scope': {'identity': runner.context.identity(),
                                               'generation': None if args.generation == 'null' else args.generation,
                                               'attempt': None if args.attempt == 'null' else args.attempt,
-                                              'revision': args.revision}})
+                                              'revision': args.revision}},
+                             explicit_stop=args.cmd == 'stop')
             print(json.dumps(data, ensure_ascii=False))
             return _result_exit(data)
         if args.cmd in ('status','launch','delegate','messages'):

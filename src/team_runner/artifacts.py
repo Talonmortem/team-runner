@@ -74,6 +74,8 @@ def validate_run(runner, run):
     relative = run.relative_to(attempts)
     if len(relative.parts) < 3 or run.resolve() != run or not run.is_dir():
         raise ValueError('select a real verification subdirectory inside an attempt')
+    if ((attempts / relative.parts[0] / '.keep').exists() or (run / '.keep').exists()):
+        raise ValueError('verification subrun or attempt pinned')
     inherited = os.environ.get('TEAM_RUNNER_ATTEMPT')
     if inherited and not run.is_relative_to(Path(inherited)):
         raise ValueError('cannot retire another attempt from a child')
@@ -91,8 +93,6 @@ def validate_run(runner, run):
         raise ValueError('no completed verification receipt in subrun')
     if any(str(run) in ref for ref in process_references()[0]):
         raise ValueError('verification subrun referenced by a live process')
-    if (run / '.keep').exists():
-        raise ValueError('verification subrun pinned')
     return run, receipts
 
 
@@ -270,6 +270,9 @@ def sweep(runner, *, attempt=None, apply=False):
     for root in roots:
         if root.parent != runner.state_dir / 'attempts' or root.resolve() != root or not root.is_dir():
             raise ValueError('invalid attempt scope')
+        if (root / '.keep').exists():
+            skipped.append({'run': str(root), 'reason': 'attempt pinned'})
+            continue
         if not attempt and not settled(root):
             continue
         for parent, dirs, files in os.walk(root, followlinks=False):
@@ -292,10 +295,12 @@ def prepare(runner, attempt, argv, *, reserve_gib=25, required_gib=12, limit_gib
     if min(reserve_gib, required_gib, limit_gib) <= 0:
         raise ValueError('storage limits must be positive')
     attempt = Path(attempt).absolute()
-    current = (runner.load_state().get('current') or {}).get('attempt_dir')
-    if str(attempt) != current:
-        raise ValueError('prepare requires the current attempt')
     with lock(runner.state_dir / 'artifact-prepare.lock', blocking=False):
+        current = (runner.load_state().get('current') or {}).get('attempt_dir')
+        if str(attempt) != current:
+            raise ValueError('prepare requires the current attempt')
+        if (attempt / '.keep').exists():
+            raise ValueError('attempt pinned')
         released = sweep(runner, attempt=attempt, apply=True)
         # Count all resident payloads, including PREPARED_NOT_RUN copies without receipts.
         size = 0

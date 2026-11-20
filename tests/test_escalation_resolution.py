@@ -201,6 +201,88 @@ class EscalationResolution(unittest.TestCase):
         self.a.recover(self.a.load_state(), technical_only=True)
         self.assertTrue(self.escalation()['closed'])
 
+    def test_reconcile_confirms_orca_follow_up_in_same_terminal_without_resending(self):
+        root, command = self.resume_command()
+        transport = self.a.orca
+        follow_up = 'follow-up-dispatch'
+        receipt = {}
+        source = {'id': root['dispatch_id'], 'runId': root['run_id'],
+                  'assigneeHandle': root['terminal'], 'processIncarnation': 'registered-process',
+                  'status': 'failed'}
+        target = dict(source, id=follow_up, followUpOf=root['dispatch_id'], status='dispatched')
+
+        def call(*args, **kwargs):
+            if args[:2] == ('orchestration', 'send'):
+                self.assertFalse(receipt, 'must not resend the decision')
+                receipt.update(transport(*args, **kwargs))
+                receipt['message'].update(to_handle='dispatch:' + follow_up,
+                                          from_handle=kwargs['mailbox'], type=args[7],
+                                          subject=args[9], body=args[11])
+                return receipt
+            if args[:2] == ('orchestration', 'request-show') and args[-1] == receipt['mutation']['requestId']:
+                return {'state': 'completed', 'receipt': receipt}
+            if args[:2] == ('orchestration', 'worker-show'):
+                if args[-1] == root['dispatch_id']:
+                    return {'dispatch': source}
+                if args[-1] == follow_up:
+                    return {'dispatch': target}
+            return transport(*args, **kwargs)
+
+        with patch.object(self.a, 'orca', side_effect=call), \
+                patch.object(self.a.launcher, 'reconcile_attempt', return_value=[]):
+            result = application.submit_v1(self.a, command)
+            self.assertEqual(result['status'], 'unknown')
+            for field, value in (('followUpOf', 'unrelated-dispatch'),
+                                 ('processIncarnation', 'different-process'), ('runId', 'other-run')):
+                with self.subTest(field=field), patch.dict(target, {field: value}):
+                    state = self.a.load_state()
+                    self.a.recover(state, technical_only=True)
+                    self.assertFalse(self.escalation(state).get('closed'))
+                    self.assertEqual(state.get('control_uncertain'), command['request_id'])
+            state = self.a.load_state()
+            self.a.recover(state, technical_only=True)
+            self.assertTrue(self.escalation(state)['closed'])
+            self.assertNotIn('control_uncertain', state)
+            self.assertEqual(state['current']['dispatch_id'], root['dispatch_id'])
+            self.a.recover(state, technical_only=True)
+            self.assertFalse(state['recovery_issues'])
+        self.assertEqual(application.submit_v1(self.a, command), result)
+
+    def test_recovery_registers_only_the_live_follow_up_on_original_terminal(self):
+        from team_runner.runner_entry import boot_id, process_stamp
+
+        attempt, root = self.prepare()
+        launcher = self.a.launcher
+        journal = launcher.journal(attempt)
+        entries = read_json(journal)
+        key = root['id'] + '-terminal'
+        launch = entries[key]
+        terminal = launch['result']['terminal']
+        marker = launch['evidence']
+        atomic_json(Path(marker['marker']), {'nonce': marker['nonce'], 'terminal': terminal,
+                    'pid': os.getpid(), 'process_stamp': process_stamp(os.getpid()), 'boot_id': boot_id()})
+        follow_up = 'follow-up'
+        source = {'id': root['dispatch_id'], 'runId': root['run_id'], 'taskId': root['task_id'],
+                  'assigneeHandle': root['terminal'], 'status': 'failed',
+                  'processIncarnation': f"{terminal['ptyId']}:{terminal['incarnationId']}"}
+        target = dict(source, id=follow_up, taskId='next-task', status='dispatched', followUpOf=root['dispatch_id'])
+        proof = {'dispatch': target, 'terminal': terminal, 'terminalResource': {'ownerDispatchId': follow_up},
+                 'observation': {'status': 'live', 'exactWorker': True}}
+        operation = str(uuid.uuid4())
+
+        with patch.object(launcher, 'orca', side_effect=lambda *a, **k: (
+                {'dispatch': source} if a[-1] == source['id'] else proof)) as call:
+            with patch.dict(target, {'processIncarnation': 'other-process'}):
+                self.assertIsNone(launcher.recover_coordinator_follow_up(attempt, source['id'], follow_up, operation))
+                self.assertEqual(len(launcher.registry(attempt)['agents']), 1)
+            record = launcher.recover_coordinator_follow_up(attempt, source['id'], follow_up, operation)
+            self.assertEqual(record['terminal_launch_key'], key)
+            self.assertEqual(record['task_id'], 'next-task')
+            self.assertEqual(launcher.registry(attempt)['agents'][0]['status'], 'superseded')
+            self.assertEqual(launcher.recover_coordinator_follow_up(attempt, source['id'], follow_up, operation), record)
+            self.assertEqual(call.call_count, 4)
+            self.assertTrue(all(c.args[:2] == ('orchestration', 'worker-show') for c in call.call_args_list))
+
     def test_paused_open_child_and_unknown_effect_prevent_delivery(self):
         root, command = self.resume_command(open_child=True)
         with patch.object(self.a, 'orca', wraps=self.a.orca) as call:

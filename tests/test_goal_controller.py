@@ -65,14 +65,15 @@ class GoalController(unittest.TestCase):
         atomic_json(self.a.state_dir / 'runner-process.json', {'nonce': nonce, 'identity': identity,
                                                             'pid': 123, 'process_stamp': 'fixture'})
         (self.a.state_dir / ('launch-' + nonce + '.claim')).touch()
-        atomic_json(self.a.state_dir / 'startup.json', {'status': 'running', 'nonce': nonce})
+        startup = {'status': 'running', 'nonce': nonce, 'close_evidence': {'process': {'pid': 123}}}
+        atomic_json(self.a.state_dir / 'startup.json', startup)
         before = self.a.state_file.read_bytes()
         with patch('team_runner.project_services.departed', return_value=True), \
                 patch('team_runner.service.start_runner', return_value={'status': 'starting'}) as start:
             self.tick(100); self.tick(103)
         start.assert_called_once()
         self.assertEqual(self.a.state_file.read_bytes(), before)
-        self.assertEqual(read_json(self.a.state_dir / 'startup.json')['status'], 'idle')
+        self.assertEqual(read_json(self.a.state_dir / 'startup.json'), dict(startup, status='idle'))
 
     def test_completed_policy_and_current_attempt_not_restarted(self):
         self.authorize()

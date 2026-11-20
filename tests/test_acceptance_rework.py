@@ -22,7 +22,6 @@ class AcceptanceRework(Fixture):
         runner.git('add', '--', 'feat')
         commit('base')
         base = runner.git('rev-parse', 'HEAD').strip()
-        store.atomic_json(tracking, {'queue': [{'id': 'X', 'status': 'completed'}]})
         artifact = goal / 'feature/evidence/x/acceptance.md'
         artifact.parent.mkdir(parents=True)
         artifact.write_text('accepted\n')
@@ -31,7 +30,7 @@ class AcceptanceRework(Fixture):
         def verify():
             return runner.verify_item(SimpleNamespace(goal='feat/goal'), 'F/X', base, [])
         self.assertTrue(any('one item commit' in p for p in verify()))
-        runner.git('add', '--', str(tracking), str(artifact))
+        runner.git('add', '--', str(artifact))
         commit('accept F/X', 'F/X')
         self.assertTrue(any('independent final review' in p for p in verify()))
         store.atomic_json(attempt / 'agents.json', {'agents': [
@@ -61,7 +60,7 @@ class AcceptanceRework(Fixture):
 
     def test_rejected_acceptance_preserves_session_and_unfenced_attempt(self):
         attempt, st = self.coordinator()
-        accepted, settle, release = self.finish(st, ['status must be completed', 'missing acceptance.md'])
+        accepted, settle, release = self.finish(st, ['missing acceptance.md'])
         self.assertFalse(accepted)
         settle.assert_not_called()
         release.assert_not_called()
@@ -200,8 +199,11 @@ class AcceptanceRework(Fixture):
             state['current'].update(dispatch_id='new', acceptance_reworks=1)
             state['current'].pop('acceptance_rework')
             return True
-        with patch.object(runner, 'process_controls'), patch.object(runner, 'ensure_run', return_value='parent'), patch('team_runner.engine.Tracking') as tracking, patch.object(runner, 'start_coordinator', return_value='start'), patch.object(runner, 'wait_coordinator', return_value={'outcome': 'succeeded', 'body': 'report'}) as wait, patch.object(runner, 'verify_item', side_effect=[['missing report'], []]), patch.object(runner, 'rework_acceptance', side_effect=correction) as repair, patch.object(runner, 'poll_children'), patch.object(runner, 'settle_children', return_value=True), patch.object(launch, 'release_agent'), patch.object(runner, 'git', return_value='head'), patch.object(runner, 'notify'):
+        with patch.object(runner, 'process_controls'), patch.object(runner, 'ensure_run', return_value='parent'), patch('team_runner.engine.for_goal') as tracking, patch.object(runner, 'start_coordinator', return_value='start'), patch.object(runner, 'wait_coordinator', return_value={'outcome': 'succeeded', 'body': 'report'}) as wait, patch.object(runner, 'verify_item', side_effect=[['missing report'], []]), patch.object(runner, 'rework_acceptance', side_effect=correction) as repair, patch.object(runner, 'poll_children'), patch.object(runner, 'settle_children', return_value=True), patch.object(launch, 'release_agent'), patch.object(runner, 'git', return_value='head'), patch.object(runner, 'notify'):
             tracking.return_value.find.return_value = ({'path': 'feature'}, None, {'id': 'X'})
+            tracking.return_value.snapshot_sha256 = None
+            tracking.return_value.resolve.return_value = ('F/X', {'id': 'F', 'path': 'feature'}, None, {'id': 'X'})
+            tracking.return_value.contract.return_value = {'item': {'id': 'X'}}
             tracking.return_value.canonical.side_effect = lambda item, strict=True: item
             self.assertEqual(runner.cmd_run(args), 0)
             tracking.return_value.next_item.assert_not_called()
@@ -216,11 +218,12 @@ class AcceptanceRework(Fixture):
         profile['acceptance']['require_clean'] = False
         args = SimpleNamespace(goal='feat/goal', handoff=None)
         feature = {'path': 'feature'}
-        with patch.object(runner, 'attempt_profile', return_value=profile):
+        with patch.object(runner, 'attempt_profile', return_value=profile), patch('team_runner.engine.for_goal'):
             spec = runner.coordinator_spec(args, feature, {'id': 'step-1'})
-            self.assertIn('exactly completed', spec)
+            self.assertIn('Runner acceptance requires evidence', spec)
             self.assertIn('feat/goal/feature/evidence/step-1/acceptance.md', spec)
-            with patch('team_runner.engine.Tracking') as tracking, patch.object(runner, 'git', return_value='head'), patch.object(runner, 'dirty_paths', return_value=[]):
+            with patch('team_runner.engine.for_goal') as tracking, patch.object(runner, 'git', return_value='head'), patch.object(runner, 'dirty_paths', return_value=[]):
+                tracking.return_value.goal_dir = runner.repo / args.goal
                 tracking.return_value.find.return_value = (feature, None, {'id': 'step-1', 'status': 'completed'})
                 problems = runner.verify_item(args, 'step-1', 'head', [])
             self.assertEqual(problems, ['нет файла feat/goal/feature/evidence/step-1/acceptance.md'])

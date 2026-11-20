@@ -11,7 +11,7 @@ from .recovery import _unknown, liveness_incident
 from .protocol import ContractError, attempt_identity, operation, summary
 from .runner_store import read_json
 from .verification import view as verification
-from .tracking import Tracking
+from .tracking import for_goal
 
 _SCOPE = {'identity', 'generation', 'attempt', 'revision'}
 _FINISHED = ('released', 'stopped', 'superseded')
@@ -156,9 +156,10 @@ def view(runner, services, observer, *, enable_actions=False):
     checks = runner.attempt_profile()['checks']
     goal = status.get('goal')
     item = current.get('item')
-    tracking_dir = (runner.repo / goal).resolve() if goal else None
-    task = (Tracking(tracking_dir).find(item) if item and tracking_dir
-            and (tracking_dir / 'Tasks.json').is_file() else None)
+    try:
+        task = for_goal(runner, goal, state).find(item) if item and goal else None
+    except FileNotFoundError:
+        task = None
     check_scope = task[2].get('check_scope', 'item') if task else 'item'
     checks_view = verification(attempt, checks, check_scope)
     network = network_view(runner)

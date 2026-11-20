@@ -151,8 +151,40 @@ def check_dispatch_message(receipt, agent, request):
 
 def check_escalation_receipt(op, result):
     args = op['args']
-    agent = {'run_id': args[3], 'dispatch_id': args[5].removeprefix('dispatch:')}
+    dispatch = op.get('confirmed_follow_up') or args[5].removeprefix('dispatch:')
+    agent = {'run_id': args[3], 'dispatch_id': dispatch}
     check_dispatch_message(result, agent, op.get('request_id'))
+
+
+def reconcile_escalation_receipt(op, result, call, mailbox):
+    """Verify a redirect from the original receipt and Orca's Dispatch records."""
+    try:
+        check_escalation_receipt(op, result)
+        return
+    except UncertainOperation as exc:
+        error = exc
+    args = op['args']
+    origin = args[5].removeprefix('dispatch:')
+    message = result.get('message') or {}
+    destination = message.get('to_handle')
+    if not isinstance(destination, str) or not destination.startswith('dispatch:'):
+        raise error
+    follow_up = destination.removeprefix('dispatch:')
+    if (not follow_up or follow_up == origin or op.get('confirmed_follow_up') or not op.get('mailbox')
+            or message.get('from_handle') != op.get('mailbox')
+            or message.get('type') != args[7] or message.get('subject') != args[9]
+            or message.get('body') != args[11]):
+        raise error
+    check_dispatch_message(result, {'run_id': args[3], 'dispatch_id': follow_up}, op['request_id'])
+    source = call('orchestration', 'worker-show', '--dispatch', origin, mailbox=mailbox).get('dispatch') or {}
+    target = call('orchestration', 'worker-show', '--dispatch', follow_up, mailbox=mailbox).get('dispatch') or {}
+    if (source.get('id') != origin or target.get('id') != follow_up
+            or target.get('followUpOf') != origin or source.get('status') not in ('completed', 'failed')
+            or source.get('runId') != args[3] or target.get('runId') != args[3]
+            or not source.get('assigneeHandle') or target.get('assigneeHandle') != source['assigneeHandle']
+            or not source.get('processIncarnation') or target.get('processIncarnation') != source['processIncarnation']):
+        raise error
+    op['confirmed_follow_up'] = follow_up
 
 
 def receipt_result(receipt):
@@ -214,7 +246,7 @@ def reconcile(path, call, *, reply_mailboxes=None):
                         continue
                 result = receipt_result(receipt['receipt'])
                 if key.startswith('escalation-resume:'):
-                    check_escalation_receipt(op, result)
+                    reconcile_escalation_receipt(op, result, call, mailbox)
             op.update(status='completed', stage='reconciled', result=result)
             op.pop('error', None)
         except Exception as exc:
@@ -250,12 +282,7 @@ def _close_proof(launch, terminal, call, receipt):
     registered = (launch.get('result') or {}).get('terminal') or {}
     if any(registered.get(k) != terminal.get(k) for k in ('handle', 'incarnationId', 'ptyId', 'worktreeId')):
         raise UncertainOperation('close and launch identities differ')
-    close = (receipt or {}).get('close') or {}
-    acknowledged = (close.get('handle') == terminal['handle']
-                    and terminal.get('tabId') and close.get('tabId') == terminal['tabId']
-                    and close.get('ptyKilled') is True)
-    if not acknowledged:
-        raise UncertainOperation('terminal close receipt unconfirmed')
+    _close_acknowledgement(receipt, terminal)
     proof = missing_terminal_evidence(launch, call, terminal['worktreeId'], pane=terminal)
     if proof is None:
         raise UncertainOperation('terminal or process exit unconfirmed')
@@ -263,14 +290,50 @@ def _close_proof(launch, terminal, call, receipt):
     return proof
 
 
+def _close_acknowledgement(receipt, terminal):
+    close = (receipt or {}).get('close') or {}
+    if (close.get('handle') != terminal['handle'] or not terminal.get('tabId')
+            or close.get('tabId') != terminal['tabId'] or close.get('ptyKilled') is not True):
+        raise UncertainOperation('terminal close receipt unconfirmed (handle, tabId or ptyKilled)')
+    return close
+
+
+MAILBOX_TERMINAL_IDS = ('handle', 'incarnationId', 'ptyId')
+
+
+def _mailbox_inventory_matches(call, terminal):
+    listing = call('terminal', 'list', '--worktree', 'id:' + terminal['worktreeId'])
+    scope = listing.get('hostScope') or {}
+    rows = listing.get('terminals')
+    if (not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows)
+            or listing.get('truncated') is not False or scope.get('hostIds') != ['local']
+            or not isinstance(scope.get('omittedHostIds'), list) or 'local' in scope['omittedHostIds']):
+        raise UncertainOperation('complete local mailbox terminal inventory unavailable')
+    return [row for row in rows if any(row.get(k) == terminal[k] for k in MAILBOX_TERMINAL_IDS)]
+
+
+def _unmarked_close_proof(journal, evidence, call, receipt):
+    terminal = evidence['terminal']
+    launch = journal.get('mailbox', {})
+    if launch.get('status') != 'completed' or (launch.get('result') or {}).get('terminal') != terminal:
+        raise UncertainOperation('mailbox creation receipt changed')
+    close = _close_acknowledgement(receipt, terminal)
+    if _mailbox_inventory_matches(call, terminal):
+        raise UncertainOperation('closed mailbox identity still present in local inventory')
+    return {'terminal': terminal, 'close': close, 'reason': 'Orca acknowledged mailbox PTY stop; exact identities absent from complete local inventory'}
+
+
 def _verify_close(path, key, op, call):
     if op.get('stage') == 'close_verified':
         return op['result']
     evidence = op['evidence']
     with lock(str(path) + '.' + op['request_id'] + '.lock', blocking=False):
-        launch = read_json(path, {}).get(evidence['launch'], {})
+        journal = read_json(path, {})
         try:
-            proof = _close_proof(launch, evidence['terminal'], call, op.get('result'))
+            if evidence.get('unmarked_mailbox'):
+                proof = _unmarked_close_proof(journal, evidence, call, op.get('result'))
+            else:
+                proof = _close_proof(journal.get(evidence['launch'], {}), evidence['terminal'], call, op.get('result'))
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
             op.update(status='unknown', error=str(exc))
             raise
@@ -336,9 +399,50 @@ def close_terminal(path, key, call, handle, incarnation, worktree_id, *, mailbox
     if any(observed.get(k) != terminal[k] for k in ('handle', 'incarnationId', 'ptyId', 'worktreeId')):
         raise RuntimeError('registered terminal identity changed; refusing close')
     terminal = {**terminal, **{k: observed[k] for k in ('tabId', 'leafId') if observed.get(k)}}
+    return _perform_close(path, key, call, {'launch': launch_key, 'terminal': terminal}, mailbox=mailbox)
+
+
+def close_unmarked_mailbox(path, call, run, worktree_id):
+    """Start markerless retirement only from a newly guarded, explicit stop."""
+    journal = read_json(path, {})
+    if 'mailbox-close' in journal:
+        raise UncertainOperation('mailbox close already recorded; reconcile its receipt')
+    launch = journal.get('mailbox', {})
+    terminal = (launch.get('result') or {}).get('terminal') or {}
+    attempt = Path(path).parent
+    marker = attempt / 'mailbox.entry.json'
+    identities = (*MAILBOX_TERMINAL_IDS, 'worktreeId')
+    if (launch.get('status') != 'completed' or launch.get('attempt') != str(attempt)
+            or launch.get('args', [])[:4] != ['terminal', 'create', '--worktree', 'id:' + worktree_id]
+            or launch.get('evidence') != {'marker': str(marker), 'nonce': 'mailbox:' + str(attempt.resolve())}
+            or marker.exists() or marker.is_symlink()
+            or not all(isinstance(terminal.get(k), str) and terminal[k] for k in (*identities, 'tabId'))
+            or terminal['worktreeId'] != worktree_id
+            or terminal['handle'] != run.get('mailbox') or terminal['incarnationId'] != run.get('incarnation')):
+        raise UncertainOperation('child mailbox creation receipt or registered identity unconfirmed')
+    child = journal.get('child-run', {})
+    created = (child.get('result') or {}).get('run') or {}
+    if (run.get('status') != 'ready' or not run.get('run_id') or child.get('status') != 'completed'
+            or child.get('attempt') != str(attempt) or child.get('mailbox') != terminal['handle']
+            or child.get('args') != ['orchestration', 'run-create', '--objective', 'goal-runner child ' + attempt.name]
+            or created.get('id') != run['run_id'] or created.get('coordinator_handle') != terminal['handle']):
+        raise UncertainOperation('child Run creation receipt or registered identity unconfirmed')
+    rows = _mailbox_inventory_matches(call, terminal)
+    if len(rows) != 1 or any(rows[0].get(k) != terminal[k] for k in identities):
+        raise UncertainOperation('registered mailbox identity changed or missing in local inventory')
+    # Orphaned list rows can have a synthetic tabId. The exact show must
+    # still resolve to the tab in the original create receipt.
+    observed = call('terminal', 'show', '--terminal', terminal['handle']).get('terminal') or {}
+    if any(observed.get(k) != terminal[k] for k in (*identities, 'tabId')):
+        raise UncertainOperation('registered mailbox identity or tab changed before close')
+    return _perform_close(path, 'mailbox-close', call,
+                          {'launch': 'mailbox', 'terminal': terminal, 'unmarked_mailbox': True})
+
+
+def _perform_close(path, key, call, evidence, *, mailbox=None):
     try:
-        mutation(path, key, call, 'terminal', 'close', '--terminal', handle,
-                 mailbox=mailbox, evidence={'launch': launch_key, 'terminal': terminal})
+        mutation(path, key, call, 'terminal', 'close', '--terminal', evidence['terminal']['handle'],
+                 mailbox=mailbox, evidence=evidence)
     except UncertainOperation:
         return _verify_close(path, key, read_json(path)[key], call)
     deadline = time.monotonic() + 2
@@ -375,10 +479,16 @@ def missing_terminal_evidence(op, call, worktree_id, *, pane=None):
     if not marker or not departed(marker):
         return None
     listing = call('terminal', 'list', '--worktree', 'id:' + worktree_id, mailbox=op.get('mailbox'))
+    if not isinstance(listing, dict):
+        return None
     scope = listing.get('hostScope') or {}
-    if (not isinstance(listing.get('terminals'), list) or listing.get('truncated') is not False
+    rows = listing.get('terminals')
+    if (not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows)
+            or listing.get('truncated') is not False or not isinstance(scope, dict)
             or scope.get('hostIds') != ['local'] or not isinstance(scope.get('omittedHostIds'), list)
             or 'local' in scope['omittedHostIds'] or (pane is None and scope['omittedHostIds'])):
+        return None
+    if pane is None and any(not (t.get('handle') or t.get('incarnationId')) for t in rows):
         return None
     # Orca may reuse a pane's ptyId after reboot with a new terminal incarnation.
     if any(t.get('handle') == terminal['handle']
@@ -387,7 +497,7 @@ def missing_terminal_evidence(op, call, worktree_id, *, pane=None):
                and t.get('tabId') == pane.get('tabId'))
            or (t.get('ptyId') == terminal['ptyId']
                and not all(t.get(k) for k in ('handle', 'incarnationId')))
-           for t in listing['terminals']):
+           for t in rows):
         return None
     return {'terminal': terminal, 'process': {k: marker.get(k) for k in
             ('pid', 'process_stamp', 'boot_id')}, 'reason': 'exact launch process departed; complete local terminal list absent'}

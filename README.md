@@ -45,6 +45,12 @@ API состояния возвращает `health: {state: "ok" | "waiting_mem
 `result: {state: "ok" | "error", error: null | string}`; `pending` ещё не означает успех.
 Неподтверждённая остановка возвращает `status: "error"` с причиной и сохраняет
 `stop_status: "unknown"`. Успех означает подтверждённую остановку ресурсов попытки.
+Явный `stop --json` может закрыть дочерний mailbox без `mailbox.entry.json`,
+если runner уже завершился, исполнители остановлены и журнал эффектов подтверждён.
+Для этого нужны квитанции создания mailbox и дочернего Run, совпадающие идентификаторы
+в Orca и квитанция закрытия PTY. После закрытия все исходные идентификаторы
+должны отсутствовать в полном локальном списке. При прерывании `reconcile` проверяет
+сохранённую квитанцию и список без повторной отправки закрытия.
 Если остановка подтверждена и текущего пункта нет, «Запустить» или «Продолжить»
 снимает остановку после проверки параметров; повтор несуществующей попытки не нужен.
 После выполнения новых пунктов прежнее успешное финальное ревью больше не заменяет
@@ -241,6 +247,33 @@ Instructions/requirements — локальные относительные ил
 
 Проверяется канонический путь checkout: похожий префикс `~/repo/sber-other` и ссылка из `sber` наружу не дают доступ. Ограничение действует в настройках, наследовании и перед dispatch, включая сохранённые snapshots. Новая сессия запускается через `opencode2 --standalone`; модель фиксируется через `OPENCODE_CONFIG_CONTENT`, вложенные агенты отключены. Сохранённые overrides Codex/Claude не меняются. Изменения настроек применяются к следующим попыткам.
 
+## Планы и приёмка
+
+Новые цели используют корневой Markdown-план, планы фич, журналы `Progress.md`
+и один файл `Queue.json` версии 1. В `queue` перечисляются фичи по порядку.
+У фичи есть `id`, путь `path` относительно цели, `depends_on` и список `items`.
+У пункта есть `id`, `task`, `depends_on` и путь `step_card` относительно фичи.
+Карточка содержит разделы Result, Input contracts, Change boundaries, Dependencies,
+Acceptance criteria, Checks и Expected evidence. Образцы создаёт `goal-prep-runner`.
+
+```sh
+team-runner validate-queue feat/goal-example
+```
+
+Команда выводит порядок пунктов и SHA-256 снимка очереди с карточками. При первом
+запуске Runner сохраняет этот снимок в состоянии workspace до создания терминала.
+Возобновление, повтор попытки и смена выборки читают снимок. Для другой исполняемой
+очереди создайте отдельную цель. В `Progress.md` можно записывать решения, блокеры
+и ссылки на проверки в ходе работы.
+
+Правила приёмки общие для новых целей и существующих целей с `Tasks.json`. Runner
+проверяет `acceptance.md`, требования профиля и stage gate, затем атомарно записывает
+успешную приёмку с ID `feature/item`, Dispatch и идентификатором попытки в
+`state.json.history` и очищает `current`. Фича открывает зависимости после приёмки
+всех её пунктов. При блокировке очередь показывает ожидающие пункты и причины.
+Координатор указывает результат проверки критериев фичи и ссылки на доказательства
+в отчёте последнего принятого пункта.
+
 ## Управление
 
 ```sh
@@ -271,9 +304,28 @@ team-runner prepare-scope --project PROJECT_UUID --workspace WORKSPACE_UUID \
 сервис, runner или агентов. Активная попытка, неизвестные эффекты, непринятые пункты
 предыдущей выборки и устаревшие generation/epoch запрещают замену. Повтор с тем же
 UUID возвращает прежнюю квитанцию; не возобновляет уже остановленную generation.
+Неизвестная квитанция старого запуска сохраняется в журнале. Она перестаёт
+блокировать замену после отзыва её epoch, подтверждённого выхода более нового
+runner и подтверждённого закрытия его терминала, если операции workspace завершены.
 Настройки ролей, режим, final и recovery сохраняются; меняется только `items`.
 Отдельный явный запуск: `execute --resume --generation NEW_GENERATION --epoch 1
 --request-id NEW_REQUEST_UUID` с теми же project/workspace.
+
+Если у текущего пункта появилась обязательная прямая зависимость, проверь передачу очереди до остановки:
+
+```sh
+team-runner prepare-dependency-handoff --project PROJECT_UUID --workspace WORKSPACE_UUID \
+  --generation GENERATION --epoch EPOCH --attempt ATTEMPT --revision REVISION \
+  --predecessor FEATURE/STEP --dry-run --json
+```
+
+Scope берётся из подтверждённого `status --json`. После отдельно согласованного `stop`
+и подтверждения закрытия ресурсов возьми свежий scope и замени `--dry-run` на
+`--request-id REQUEST_UUID`. При прерывании повтори запрос с тем же UUID и
+исходными аргументами. Команда закрепляет старый каталог попытки, добавляет
+предшественника в выборку и сохраняет новую generation на паузе. После отдельного
+`execute --resume` отложенный пункт получит новую попытку с текущим снимком
+зависимостей, когда runner примет предшественника и подтвердит зависимость.
 
 Дочерние роли получают TEAM_RUNNER_PROJECT/WORKSPACE/STATE/CHECKOUT/ATTEMPT/MATERIALS. В этом контексте ID можно не повторять; конфликт explicit IDs с окружением отклоняется:
 
@@ -483,10 +535,18 @@ checkout-lock и ждёт кратковременный runner-lock техни�
 
 Profile checks may set `scope: "item"` or `scope: "stage"`. Omitted scope retains legacy behavior.
 A stage-ending tracking item sets `check_scope: "stage"`, `gate_roots`, `gate_command`, and depends on
-all working items of that stage. `gate_evidence` contains checkout-relative `path` (verification result),
-`manifest`, `sha256`, plus an absolute unused `accepted` receipt path in the current attempt.
-Runner checks the live candidate, child results and resource settlement before writing that receipt.
-Later stages may change the tree without reopening an already accepted boundary.
+all working items of that stage. The feature can name its required local gate in `stage_gate`.
+
+For `Queue.json`, the coordinator puts the manifest, verification result and logs under
+`$TEAM_RUNNER_ATTEMPT`. In `stage-gate.json` at the attempt root, give the attempt-relative result
+`path`, the attempt-relative `manifest` and its `sha256` from `manifest create`. Cite the declaration
+in `acceptance.md`. Runner verifies the current attempt, input manifest, command and logs before
+writing `stage-accepted.json` and recording the evidence in history.
+
+For `Tasks.json`, `gate_evidence` contains the checkout-relative result `path`, `manifest` and
+`sha256`, with an absolute unused `accepted` receipt path in the attempt. Both formats require
+the live candidate, child results and resource settlement before the Runner records acceptance.
+Later stages can change the checkout while a verified historical gate remains accepted.
 
 `team-runner events list` reads pending events in the inherited attempt. After processing, the exact
 coordinator acknowledges IDs with `team-runner events ack --dispatch DISPATCH --ids ID,ID`.
@@ -510,7 +570,12 @@ with `--enable-actions` and use **Отправить решение** on an acti
 The runner closes it after Orca confirms acceptance. Turn start and completion
 are observed separately. If delivery is unconfirmed, run `team-runner reconcile`
 for the selected workspace to check the original Orca request. The command's
-original receipt is preserved.
+original receipt is preserved. If Orca redirected the message to a follow-up
+Dispatch, reconciliation checks the original request, message contents, Run,
+Dispatch lineage and terminal incarnation. This confirms delivery separately
+from ownership or readiness of the follow-up Dispatch. An explicit reconcile can
+restore a coordinator on that follow-up when its original process and terminal
+ownership are verified and all previous child calls have settled.
 
 Create a frozen manifest with `team-runner manifest create --checkout PATH --root backend --root frontend
 --root scripts --root config --manifest FILE`. Save its JSON receipt; feed the returned digest

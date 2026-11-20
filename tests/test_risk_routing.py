@@ -168,6 +168,10 @@ class FinalAcceptance(Fixture):
         self.feature = {'queue': [{'id': 'T1', 'status': 'completed'}]}
         store.atomic_json(self.goal / 'Tasks.json', self.goal_data)
         store.atomic_json(self.goal / 'f/Tasks.json', self.feature)
+        self.state = {'goal': self.args.goal, 'history': [
+            {'item': 'F/T1', 'dispatch_id': 'accepted', 'outcome': 'succeeded', 'problems': []}
+        ]}
+        runner.save_state(self.state)
         self.artifact = self.goal / 'f/evidence/t1/acceptance.md'
         self.artifact.parent.mkdir(parents=True); self.artifact.write_text('evidence')
         self.report = self.goal / 'evidence/goal-final-review.md'
@@ -186,15 +190,17 @@ class FinalAcceptance(Fixture):
     def test_tracking_must_be_present_readable_and_complete(self):
         path = self.goal / 'f/Tasks.json'
         path.unlink()
-        self.assertIn('missing feature tracking', '\n'.join(self.verify()))
+        self.assertIn('F: отсутствует описание фичи', self.verify())
         path.write_text('broken')
         self.assertIn('invalid tracking', '\n'.join(self.verify()))
         self.feature['queue'][0]['status'] = 'in_progress'
         store.atomic_json(path, self.feature)
-        self.assertIn('F/T1: expected completed', self.verify())
+        self.assertEqual(self.verify(), [])
         self.goal_data['queue'][0]['status'] = 'in_progress'
         store.atomic_json(self.goal / 'Tasks.json', self.goal_data)
-        self.assertIn('feature F: expected completed', self.verify())
+        self.assertEqual(self.verify(), [])
+        runner.save_state({**self.state, 'history': []})
+        self.assertIn('F/T1: ожидает приёмки', self.verify())
         (self.goal / 'Tasks.json').unlink()
         self.assertIn('invalid tracking', '\n'.join(self.verify()))
 

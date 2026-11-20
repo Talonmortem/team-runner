@@ -76,19 +76,30 @@ def _capture(runner):
                           for directory in ('commands', 'ui/commands')
                           for p in sorted((runner.state_dir / directory).glob('*.json'))}
     tracking = {}
+    progress = {'total': 0, 'completed': 0, 'missing_features': [], 'incomplete_features': []}
     goal = values['intent'].get('goal') or state.get('goal')
     if goal:
         goal_dir = (runner.repo / goal).resolve()
         tracking_root = (runner.repo / runner.attempt_profile(snapshot=state)['tracking_root']).resolve()
         if not goal_dir.is_relative_to(tracking_root):
             raise ContractError('invalid_goal', 'Goal is outside tracking root')
-        data = read_json(goal_dir / 'Tasks.json')
-        tracking['goal'] = data
-        for feature in (data or {}).get('queue', []):
-            path = (goal_dir / feature['path'] / 'Tasks.json').resolve()
-            if not path.is_relative_to(goal_dir):
-                raise ContractError('invalid_goal', 'Feature is outside goal directory')
-            tracking[feature['id']] = read_json(path)
+        from .tracking import for_goal
+        try:
+            queue = for_goal(runner, goal, state)
+        except FileNotFoundError:
+            queue = None
+        if queue is not None:
+            present = {feat['id']: data for feat, _, data in queue.features()}
+            tracking = {'goal': queue.goal, 'features': present}
+            progress['total'] = sum(1 for _ in queue.items())
+            progress['completed'] = sum(queue.item_done(key) for key, *_ in queue.items())
+            for feature in queue.goal['queue']:
+                key = feature['id']
+                if key not in present:
+                    progress['missing_features'].append(key)
+                if not queue.feature_done(key):
+                    progress['incomplete_features'].append(key)
+    values['progress'] = progress
     from .catalog import Catalog
     from .service_intent import read as service_permission
     catalog = Catalog(runner.context.config_root, runner.context.state_root)
@@ -110,9 +121,12 @@ def control_facts(facts):
     return facts
 
 
-def summary(runner):
+def summary(runner, *, owns_runner_lock=False):
     first = control_facts(_capture(runner))
     facts = control_facts(_capture(runner))
+    if owns_runner_lock:
+        # The scope writer holds the lock after proving the runner has exited.
+        first['runner_running'] = facts['runner_running'] = False
     confirmed = first == facts
     state, intent = facts['state'], facts['intent']
     cur = state.get('current') or {}
@@ -127,22 +141,7 @@ def summary(runner):
         desired = 'stopped' if state.get('stop_requested') else 'paused'
     if desired not in ('running', 'paused', 'stopped'):
         raise ContractError('invalid_intent', 'Invalid desired state')
-    progress = {'total': 0, 'completed': 0, 'missing_features': [], 'incomplete_features': []}
-    tracking = facts['tracking']
-    for feature in (tracking.get('goal') or {}).get('queue', []):
-        data = tracking.get(feature['id'])
-        if data is None:
-            progress['missing_features'].append(feature['id'])
-        queue = (data or {}).get('queue', [])
-        from .verification import gate_valid
-        accepted = [item.get('status') == 'completed' and gate_valid(runner.repo, item) for item in queue]
-        gates = [item for item in queue if item.get('check_scope') == 'stage']
-        required = feature.get('stage_gate')
-        missing_gate = required and not any(item['id'] == required for item in gates)
-        if feature.get('status') != 'completed' or missing_gate or (gates and not all(accepted)):
-            progress['incomplete_features'].append(feature['id'])
-        progress['total'] += len(queue)
-        progress['completed'] += sum(accepted)
+    progress = facts['progress']
     from .event_scope import pending
     registry = facts.get('agents', {})
     active_messages = pending(cur, registry) if cur.get('attempt_dir') else cur.get('messages', [])
@@ -230,6 +229,9 @@ def summary(runner):
               {'issues': state.get('recovery_issues', []), 'reason': recovery_fact.get('reason')})
     elif state.get('last_error'):
         block('runner_error', state['last_error'], ['reconcile'])
+    elif state.get('queue_blocked') and not cur:
+        block('queue_incomplete', 'Очередь ждёт приёмки. ' + '. '.join(state['queue_blocked']), ['start'],
+              {'items': state['queue_blocked']})
     elif limited_calls and not waiting_for_pass:
         block('graph_edge_limit', 'Лимит связи исчерпан. Разрешите один проход либо остановите выполнение.',
               ['stop'], {'calls': limited_calls})
@@ -321,7 +323,14 @@ def operation(runner, identifier):
         version(command)
         if record.get('id') != identifier or command.get('request_id') != identifier:
             raise ContractError('invalid_operation', 'Operation request identity mismatch')
-        if command.get('scope', {}).get('identity') != runner.context.identity():
+        payload = command.get('payload')
+        scope = command.get('scope', {})
+        preparation = record.get('action') in ('prepare-scope', 'prepare-dependency-handoff')
+        if preparation:
+            scope = {key: command[key] for key in ('identity', 'generation', 'epoch', 'attempt', 'revision')
+                     if key in command}
+            payload = {key: command[key] for key in ('items', 'predecessor') if key in command}
+        if scope.get('identity') != runner.context.identity():
             raise ContractError('identity_mismatch', 'Operation belongs to another workspace')
         statuses = {'pending': 'pending', 'running': 'running', 'succeeded': 'succeeded',
                     'failed': 'failed', 'unknown': 'unknown', 'done': 'succeeded',
@@ -334,8 +343,10 @@ def operation(runner, identifier):
         compatibility = ({'source': str(path.relative_to(runner.state_dir)), 'legacy_status': record['status']}
                          if record['status'] in ('done', 'error', 'applying') else None)
         return {'schema_version': SCHEMA_VERSION, 'request_id': identifier,
-                'action': command['action'], 'scope': command['scope'], 'payload': command['payload'],
-                'status': statuses[record['status']], 'result': record.get('result'), 'error': error,
+                'action': command['action'], 'scope': scope, 'payload': payload,
+                'status': statuses[record['status']],
+                'result': (None if preparation and record['status'] == 'pending' else record.get('result')),
+                'error': error,
                 'compatibility': compatibility}
     statuses = {'pending': 'pending', 'applying': 'unknown', 'done': 'succeeded',
                 'error': 'failed', 'unknown': 'unknown'}

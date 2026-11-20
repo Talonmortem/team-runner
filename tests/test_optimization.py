@@ -94,14 +94,15 @@ class Verification(unittest.TestCase):
         atomic_json(goal/'e9/Tasks.json',{'queue':[{'id':'work','status':'completed'},
             {'id':'gate','status':'completed','check_scope':'stage','depends_on':['work']}]})
         atomic_json(goal/'e10/Tasks.json',{'queue':[{'id':'next','status':'not_started'}]})
-        tracking=Tracking(goal);self.assertFalse(tracking.feature_done('E9'))
+        history = [{'item': 'E9/work', 'dispatch_id': 'work-d', 'outcome': 'succeeded', 'problems': []}]
+        tracking = Tracking(goal, history)
+        self.assertFalse(tracking.feature_done('E9'))
         self.assertEqual(tracking.next_item()[2]['id'],'gate')
         tracking.goal['queue'][0]['stage_gate']='gate'
         (goal/'e9/Tasks.json').unlink()
+        tracking = Tracking(goal, history)
         self.assertFalse(tracking.feature_done('E9'))
         self.assertIsNone(tracking.next_item())
-        del tracking.goal['queue'][0]['stage_gate']
-        self.assertTrue(tracking.feature_done('E9'))
 
     def test_heavy_clean_and_unknown_crash_residue(self):
         path=self.root/'heavy.lock'

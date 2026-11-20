@@ -12,6 +12,7 @@ def tick(runner, now, stopped=lambda: False):
     from .goal_completion import read as completion
     from .project_services import departed
     from .recovery import _unknown
+    from .runner_terminal import mark_idle
     from .service import start_runner
 
     intent = goal_intent.read(runner)
@@ -73,7 +74,7 @@ def tick(runner, now, stopped=lambda: False):
         reason = None
         with lock(runner.state_dir / 'runner.lock', blocking=False):
             state = runner.load_state()
-            if state.get('current') or stopped() or not goal_intent.permitted(runner, **scope):
+            if state.get('current') or state.get('queue_blocked') or stopped() or not goal_intent.permitted(runner, **scope):
                 return
             if state.get('stop_requested') and state.get('stop_status') != 'stopped':
                 return
@@ -104,8 +105,7 @@ def tick(runner, now, stopped=lambda: False):
                         if read_json(runner.state_dir / 'launch.json', {}) != launch:
                             reason = 'runner_launch_changed'
                         else:
-                            atomic_json(runner.state_dir / 'startup.json',
-                                        {'status': 'idle', 'nonce': launch['nonce']})
+                            mark_idle(runner.state_dir, launch['nonce'])
                 if reason is None:
                     journal.update(status='recovering', phase='launch', request_id=str(uuid.uuid4()),
                                    previous_nonce=launch.get('nonce'), next_check_at=None)

@@ -21,15 +21,13 @@ class GoalCompletion(unittest.TestCase):
         self.goal = self.a.repo / goal
         self.root_path = self.goal / 'Tasks.json'
         self.feature_path = self.goal / 'feat-one/Tasks.json'
-        root = read_json(self.root_path)
-        for feat in root['queue']:
-            feat['status'] = 'completed'
-        atomic_json(self.root_path, root)
         feature = read_json(self.feature_path)
-        for item in feature['queue']:
-            item['status'] = 'completed'
-        atomic_json(self.feature_path, feature)
         self.state = {'goal': goal, 'history': []}
+        tracking = completion.for_goal(self.a, goal, self.state)
+        for key, feat, _, item in tracking.items():
+            self.state['history'].append({'item': key, 'outcome': 'succeeded', 'problems': [],
+                                          'dispatch_id': key, 'attempt_id': key,
+                                          'item_contract': tracking.contract(feat, item)})
         if final:
             evidence = self.a.attempt_profile()['evidence_dir']
             self.report = self.goal / evidence / 'goal-final-review.md'
@@ -42,7 +40,7 @@ class GoalCompletion(unittest.TestCase):
             self.state['history'].append({'item': completion.FINAL_ID, 'outcome': 'succeeded',
                 'problems': [], 'dispatch_id': 'final-dispatch',
                 'completion_generation': auth['generation'],
-                'tracking_fingerprint': completion.tracking_fingerprint(self.a, goal),
+                'tracking_fingerprint': completion.tracking_fingerprint(self.a, goal, self.state),
                 'source_proof': completion.source_proof(self.a, goal)})
         self.a.save_state(self.state)
 
@@ -69,7 +67,7 @@ class GoalCompletion(unittest.TestCase):
         self.assertEqual(completion.record(self.a, self.state), {})
 
     def test_incomplete_and_unresolved_dependencies_never_complete(self):
-        for change in ({'status': 'blocked'}, {'depends_on': ['missing']}):
+        for change in ({'task': 'changed contract'}, {'depends_on': ['missing']}):
             with self.subTest(change=change):
                 self.prepare(final=False) if not hasattr(self, 'state') else None
                 feature = read_json(self.feature_path)
@@ -183,10 +181,10 @@ class GoalCompletion(unittest.TestCase):
         wrapped = SimpleNamespace(repo=self.a.repo, state_dir=state / 'workspace',
                                   context=SimpleNamespace(state_root=state),
                                   attempt_profile=self.a.attempt_profile)
-        before = completion.source_proof(wrapped, self.state['goal'])
+        before = completion.source_proof(wrapped, self.state['goal'], self.state)
         state.mkdir()
         (state / 'receipt.json').write_text('runtime projection')
-        self.assertEqual(completion.source_proof(wrapped, self.state['goal']), before)
+        self.assertEqual(completion.source_proof(wrapped, self.state['goal'], self.state), before)
 
     def test_source_mode_symlink_and_deleted_tracked_file_change_proof(self):
         self.prepare()
@@ -208,7 +206,7 @@ class GoalCompletion(unittest.TestCase):
 
     def test_source_mutation_during_final_verification_is_not_accepted(self):
         self.prepare()
-        state = {'goal': self.state['goal'], 'history': [], 'current': {
+        state = {'goal': self.state['goal'], 'history': self.state['history'][:-1], 'current': {
             'item': completion.FINAL_ID, 'dispatch_id': 'new-final'}}
         self.a.save_state(state)
         def verify():

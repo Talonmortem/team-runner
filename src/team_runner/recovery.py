@@ -12,6 +12,7 @@ from .orca import OrcaJSONError
 from .runner_store import atomic_json, enqueue, lock, read_json, running
 
 DELAYS = (2, 5, 15, 30, 60, 120)
+TERMINAL_CHECK_INTERVAL = 30
 
 
 def settings(runner):
@@ -202,6 +203,7 @@ class Supervisor:
         self.catalog, self.project_id, self.runner_factory, self.clock = catalog, project_id, runner_factory, clock
         self.stop_event = threading.Event()
         self.threads = {}
+        self.next_terminal_check = {}
         self.thread = None
 
     def start(self):
@@ -355,10 +357,18 @@ class Supervisor:
 
     def tick(self, runner):
         from .project_services import departed
+        from . import runner_terminal
         from .service import start_runner
         if self.stop_event.is_set() or not settings(runner)['enabled']:
             return
         with lock(runner.state_dir / 'recovery-supervisor.lock', blocking=False):
+            now = self.clock()
+            if now >= self.next_terminal_check.get(runner.state_dir, 0):
+                self.next_terminal_check[runner.state_dir] = now + TERMINAL_CHECK_INTERVAL
+                try:
+                    runner_terminal.reconcile(runner)
+                except (RuntimeError, OSError, ValueError):
+                    pass  # Retry observation independently of queue recovery.
             st = runner.load_state()
             cur = st.get('current') or {}
             intent = settings(runner)['intent']
@@ -461,7 +471,9 @@ class Supervisor:
                     if not permitted():
                         return
                     with lock(runner.state_dir / 'start.lock'):
-                        atomic_json(runner.state_dir / 'startup.json', {'status': 'idle', 'nonce': launch['nonce']})
+                        if read_json(runner.state_dir / 'launch.json', {}) != launch:
+                            return
+                        runner_terminal.mark_idle(runner.state_dir, launch['nonce'])
                     if intent == 'stopped':
                         journal.update(action='finish requested stop', phase='intent')
                         atomic_json(journal_path, journal)

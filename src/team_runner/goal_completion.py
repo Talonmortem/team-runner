@@ -7,7 +7,7 @@ import subprocess
 
 from . import goal_intent
 from .runner_store import atomic_json, read_json
-from .tracking import Tracking
+from .tracking import for_goal
 
 FINAL_ID = 'GOAL-FINAL-REVIEW'
 
@@ -17,12 +17,12 @@ def _digest(value):
                                      ensure_ascii=False).encode()).hexdigest()
 
 
-def tracking_fingerprint(runner, goal):
+def tracking_fingerprint(runner, goal, state=None):
     """Require the complete tracking tree, including dependencies, before hashing."""
     directory = (runner.repo / goal).resolve()
     if not directory.is_relative_to(runner.repo.resolve()):
         raise ValueError('goal escapes checkout')
-    tr = Tracking(directory)
+    tr = for_goal(runner, goal, state)
     if not isinstance(tr.goal.get('queue'), list):
         raise ValueError('invalid goal queue')
     features = list(tr.features())
@@ -31,9 +31,9 @@ def tracking_fingerprint(runner, goal):
     feature_ids = [f['id'] for f in tr.goal['queue']]
     if len(set(feature_ids)) != len(feature_ids):
         raise ValueError('duplicate feature identity')
-    documents = {'Tasks.json': tr.goal}
-    for feat, path, data in features:
-        if not tr.feature_done(feat['id']) or feat.get('status') != 'completed' or not isinstance(data.get('queue'), list):
+    documents = []
+    for feat, _, data in features:
+        if not tr.feature_done(feat['id']) or not isinstance(data.get('queue'), list):
             raise ValueError('feature incomplete or invalid')
         ids = [item['id'] for item in data['queue']]
         if len(set(ids)) != len(ids):
@@ -42,16 +42,19 @@ def tracking_fingerprint(runner, goal):
             if dep not in feature_ids or not tr.feature_done(dep):
                 raise ValueError('feature dependency incomplete')
         for item in data['queue']:
-            if not tr.item_done(item):
+            if not tr.item_done(tr.key(feat, item)):
                 raise ValueError('item incomplete')
             for dep in item.get('depends_on', []):
                 if not tr.dependency_done(feat, data, dep):
                     raise ValueError('item dependency incomplete')
-        documents[str(path.relative_to(directory))] = data
+        documents.append([
+            {'contract': tr.contract(feat, item), 'acceptance': tr.acceptance(tr.key(feat, item))}
+            for item in data['queue']
+        ])
     return _digest(documents)
 
 
-def source_proof(runner, goal):
+def source_proof(runner, goal, state=None):
     """Read the reviewed worktree and required artifacts, without touching Git state.
 
     Scope is tracked and nonignored untracked files, plus required acceptance
@@ -80,7 +83,7 @@ def source_proof(runner, goal):
     if not directory.is_relative_to(repo):
         raise ValueError('goal escapes checkout')
     profile = runner.attempt_profile()
-    tr = Tracking(directory)
+    tr = for_goal(runner, goal, state)
     artifacts = [directory / profile['evidence_dir'] / 'goal-final-review.md']
     for feat, _, data in tr.features():
         artifacts.extend(directory / feat['path'] / profile['evidence_dir'] /
@@ -121,7 +124,7 @@ def _candidate(runner, state, intent):
             or state.get('control_uncertain') or state.get('recovery_issues')
             or state.get('stop_requested') or state.get('skipped')):
         return {}
-    fingerprint = tracking_fingerprint(runner, intent['goal'])
+    fingerprint = tracking_fingerprint(runner, intent['goal'], state)
     final = intent['policy']['final']
     proof = None
     if final:
@@ -130,7 +133,7 @@ def _candidate(runner, state, intent):
                 or last.get('problems') != [] or not last.get('dispatch_id')
                 or last.get('completion_generation') != intent['generation']
                 or last.get('tracking_fingerprint') != fingerprint
-                or last.get('source_proof') != source_proof(runner, intent['goal'])):
+                or last.get('source_proof') != source_proof(runner, intent['goal'], state)):
             return {}
         proof = _digest(last)
     return {'schema_version': 1, 'identity': runner.context.identity(),

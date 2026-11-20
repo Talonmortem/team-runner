@@ -829,7 +829,7 @@ class Autonomy(unittest.TestCase):
         self.finish(attempt, fresh)
         self.finish(attempt, impl)
         self.assertFalse(graph.rework_problems(self.a.launcher.registry(attempt)))
-        # Track acceptance closes before the last item's report and unblocks its dependency.
+        # Runner acceptance of the last item opens the dependent feature.
         goal = self.a.repo / application.goals(self.a)[0]
         atomic_json(goal / 'Tasks.json', {'kind': 'goal', 'queue': [
             {'id': 'feature', 'path': 'feat-one', 'status': 'completed'},
@@ -840,8 +840,10 @@ class Autonomy(unittest.TestCase):
         (goal / 'feat-one/evidence/t1/acceptance.md').write_text('Criteria and independent recheck PASS; track accepted.')
         state = self.a.load_state()
         state['current'].update(item='feature/T1', dispatch_id=root['dispatch_id'], terminal=root['terminal'])
-        state['run_id'] = root['run_id']; self.a.save_state(state)
+        state['run_id'] = root['run_id']
         args = SimpleNamespace(goal=str(goal.relative_to(self.a.repo)))
+        state['goal'] = args.goal
+        self.a.save_state(state)
         # Synthetic transport marks only this exact coordinator completed.
         transport = read_json(self.a.launcher.orca.root / 'transport.json')
         transport['workers'][root['dispatch_id']]['done'] = True
@@ -849,8 +851,8 @@ class Autonomy(unittest.TestCase):
         with patch.object(self.a, 'poll_children'), patch.object(self.a, 'git', return_value='head'), patch.object(self.a, 'notify'):
             self.assertTrue(self.a.finish_item(args, state, {'outcome':'succeeded','body':'accepted'},
                 lambda: self.a.verify_item(args, 'feature/T1', 'head', [])))
-        from team_runner.tracking import Tracking
-        tr = Tracking(goal)
+        from team_runner.tracking import for_goal
+        tr = for_goal(self.a, args.goal)
         self.assertEqual(tr.key(tr.next_item()[0], tr.next_item()[2]), 'dependent/T2')
         self.assertIsNone(self.a.load_state()['current'])
 

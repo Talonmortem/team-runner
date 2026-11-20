@@ -70,8 +70,16 @@ class CommandsV1(unittest.TestCase):
         self.assertTrue(messages[1]['answered'])
 
     def test_interrupted_reply_requires_its_own_receipt_and_preserves_command(self):
-        self.a.save_state({'run_id': 'owner', 'mailbox': 'old', 'history': [], 'current': {'item': 'one',
-            'messages': [{'id': 'q', 'run_id': 'owner', 'type': 'question'}]}})
+        from team_runner.tracking import for_goal
+
+        goal = 'feat/goal-fixture'
+        feature_path = self.a.repo / goal / 'feat-one/Tasks.json'
+        feature = read_json(feature_path)
+        feature['queue'][0]['status'] = 'completed'
+        feature['queue'][1]['depends_on'] = ['T1']
+        atomic_json(feature_path, feature)
+        self.a.save_state({'goal': goal, 'run_id': 'owner', 'mailbox': 'old', 'history': [],
+            'current': {'item': 'feature/T1', 'messages': [{'id': 'q', 'run_id': 'owner', 'type': 'question'}]}})
         data = {'message_id': 'q', 'run_id': 'owner', 'text': 'yes'}
         sends, receipts = [], {}
         receipt_visible = False
@@ -83,6 +91,7 @@ class CommandsV1(unittest.TestCase):
                     return {'state': 'completed', 'receipt': receipts[args[-1]]}
                 return {'state': 'pending'}
             self.assertEqual(args[:2], ('orchestration', 'reply'))
+            self.assertEqual(args[args.index('--run') + 1], 'owner')
             sends.append((mailbox, args[-1]))
             if mailbox == 'old':
                 exc = RuntimeError('stable pane required')
@@ -124,6 +133,7 @@ class CommandsV1(unittest.TestCase):
             self.assertEqual(protocol.operation(self.a, third['request_id'])['status'], 'succeeded')
         self.assertEqual([mailbox for mailbox, _ in sends], ['old', 'new'])
         self.assertEqual(list(receipts), [sends[-1][1]])
+        self.assertIsNone(for_goal(self.a, goal).next_item(only={'feature/T2'}))
 
     def test_exact_retry_returns_immutable_receipt_conflict_rejected(self):
         command = self.command()

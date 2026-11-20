@@ -153,53 +153,77 @@ def reuse(source, inputs, attempt, output):
     return value
 
 
-def gate_valid(checkout, item, current=False):
+def attempt_gate(attempt):
+    """Read the coordinator's declaration from the current attempt."""
+    directory = Path(attempt).resolve(strict=True)
+    proof = read_json(inside(directory, 'stage-gate.json'))
+    if not isinstance(proof, dict) or set(proof) != {'path', 'manifest', 'sha256'}:
+        raise ValueError('stage-gate.json must declare path, manifest and sha256')
+    return {**proof, 'accepted': str(directory / 'stage-accepted.json')}
+
+
+def _gate_receipt(checkout, item, *, current, attempt):
+    proof = item['gate_evidence']
+    source = Path(attempt).resolve(strict=True) if attempt is not None else checkout
+    result = read_json(inside(source, proof['path']), {})
+    manifest = inside(source, proof['manifest'])
+    raw = manifest.read_bytes()
+    if not DIGEST.fullmatch(proof['sha256']) or hashlib.sha256(raw).hexdigest() != proof['sha256']:
+        raise ValueError('stage gate manifest digest mismatch')
+    frozen = json.loads(raw)
+    inputs = result.get('inputs', {})
+    manifest_inputs = digest(frozen)
+    if (result.get('result') != 'PASS' or result.get('status') not in ('executed', 'reused')
+            or not result.get('logs') or inputs.get('command') != item['gate_command']
+            or frozen['roots'] != item['gate_roots'] or inputs.get('manifest_inputs') != manifest_inputs
+            or result.get('postflight') != manifest_inputs):
+        raise ValueError('stage gate evidence differs from contract')
+    if attempt is not None and (result.get('attempt') != str(source)
+                                or proof['accepted'] != str(inside(source, 'stage-accepted.json'))):
+        raise ValueError('stage gate evidence belongs to another attempt')
+    for log in result['logs']:
+        path = Path(log['path'])
+        if attempt is not None and (not path.is_absolute() or not path.resolve().is_relative_to(source)):
+            raise ValueError('stage gate log escapes attempt')
+        if hashlib.sha256(path.read_bytes()).hexdigest() != log['sha256']:
+            raise ValueError('stage gate log digest mismatch')
+    if current:
+        checked = verify(checkout, manifest, proof['sha256'])
+        if checked['result'] != 'PASS' or inputs != evidence_inputs(
+                checked, item['gate_command'], inputs['toolchain'], inputs['environment'], True):
+            raise ValueError('stage gate is stale')
+    evidence = digest(result)
+    if 'evidence_sha256' in proof and proof['evidence_sha256'] != evidence:
+        raise ValueError('stage gate result changed after acceptance')
+    return {'manifest': proof['sha256'], 'evidence': evidence, 'item': item['id']}
+
+
+def _gate_receipt_path(checkout, item):
+    value = item['gate_evidence']['accepted']
+    path = Path(value)
+    return path if path.is_absolute() else inside(checkout, value)
+
+
+def gate_valid(checkout, item, current=False, *, attempt=None):
     if item.get('check_scope') != 'stage':
         return True
     try:
-        proof = item['gate_evidence']
-        result = read_json(inside(checkout, proof['path']), {})
-        manifest = inside(checkout, proof['manifest'])
-        raw = manifest.read_bytes()
-        if not DIGEST.fullmatch(proof['sha256']) or hashlib.sha256(raw).hexdigest() != proof['sha256']:
-            return False
-        frozen = json.loads(raw)
-        inputs = result.get('inputs', {})
-        if (result.get('result') != 'PASS' or result.get('status') not in ('executed', 'reused')
-                or not result.get('logs') or inputs.get('command') != item['gate_command']
-                or frozen['roots'] != item['gate_roots'] or inputs.get('manifest_inputs') != digest(frozen)
-                or result.get('postflight') != digest(frozen)):
-            return False
-        for log in result['logs']:
-            if hashlib.sha256(Path(log['path']).read_bytes()).hexdigest() != log['sha256']:
-                return False
-        # Accepted historical boundaries stay accepted when the next stage changes code.
-        # Runner verifies the live candidate before it writes the acceptance receipt.
-        if not current:
-            receipt_path = Path(proof['accepted'])
-            if not receipt_path.is_absolute():
-                receipt_path = inside(checkout, proof['accepted'])
-            receipt = read_json(receipt_path, {})
-            return receipt == {'manifest': proof['sha256'], 'evidence': digest(result), 'item': item['id']}
-        checked = verify(checkout, manifest, proof['sha256'])
-        return checked['result'] == 'PASS' and inputs == evidence_inputs(
-            checked, item['gate_command'], inputs['toolchain'], inputs['environment'], True)
-    except (ValueError, OSError, KeyError, TypeError):
+        receipt = _gate_receipt(checkout, item, current=current, attempt=attempt)
+        # Historical boundaries survive subsequent source changes.
+        return current or read_json(_gate_receipt_path(checkout, item), {}) == receipt
+    except (ValueError, OSError, KeyError, TypeError, AttributeError, RuntimeError):
         return False
 
 
-def accept_gate(checkout, item):
-    if not gate_valid(checkout, item, current=True):
-        raise ValueError('stage gate is missing, failed or stale')
-    proof = item['gate_evidence']
-    result = read_json(inside(checkout, proof['path']), {})
-    path = Path(proof['accepted'])
-    if not path.is_absolute():
-        path = inside(checkout, proof['accepted'])
-    receipt = {'manifest': proof['sha256'], 'evidence': digest(result), 'item': item['id']}
-    if path.exists() and read_json(path) != receipt:
-        raise ValueError('accepted stage boundary is immutable; use a new receipt path')
-    atomic_json(path, receipt)
+def accept_gate(checkout, item, *, attempt=None):
+    receipt = _gate_receipt(checkout, item, current=True, attempt=attempt)
+    path = _gate_receipt_path(checkout, item)
+    if path.exists():
+        if read_json(path) != receipt:
+            raise ValueError('accepted stage boundary is immutable; use a new receipt path')
+    else:
+        atomic_json(path, receipt)
+    return receipt
 
 
 def fixture_preflight(checkout, paths):

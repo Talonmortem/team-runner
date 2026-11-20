@@ -29,7 +29,10 @@ class TrackingTest(unittest.TestCase):
             write(goal / fid / "Tasks.json", data)
             prev = fid
         write(goal / "Tasks.json", {"queue": queue})
-        return Tracking(goal)
+        history = [{'item': f"{fid}/{item['id']}", 'dispatch_id': f"{fid}-{item['id']}",
+                    'outcome': 'succeeded', 'problems': []}
+                   for fid, data in features for item in data['queue'] if item['status'] == 'completed']
+        return Tracking(goal, history)
 
     def test_step_ids_repeated_across_features_resolve_within_their_feature(self):
         tr = self.goal([("f1", steps("completed", "not_started")), ("f2", steps("not_started", "not_started")),
@@ -57,7 +60,7 @@ class TrackingTest(unittest.TestCase):
         self.assertEqual(tr.find("step-1")[0]["id"], "f1")  # legacy state: first match
         self.assertIsNone(tr.resolve("missing"))
         idx = tr.status_index()
-        self.assertEqual((idx["f1/step-1"], idx["f2/step-1"], idx["step-3"]), ("completed", "not_started", "x"))
+        self.assertEqual((idx["f1/step-1"], idx["f2/step-1"], idx["step-3"]), ("completed", "pending", "pending"))
         self.assertNotIn("step-1", idx)
 
     def test_only_and_skipped_use_qualified_keys(self):
