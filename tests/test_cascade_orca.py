@@ -265,6 +265,18 @@ class CascadeOrcaTest(unittest.TestCase):
                 cascade_orca_entry.main()
             self.assertEqual(launch.call_count, 1)
 
+            os.environ['TEAM_RUNNER_PROJECT'] = 'project'
+            plan['argv'] = [sys.executable, '-m', 'team_runner.cascade_role']
+            plan['guard'] = {'image': 'fixture'}
+            atomic_json(path, plan)
+            with (patch('sys.argv', ['cascade_orca_entry', str(path), _digest(plan)]),
+                  patch('os.execve') as launch_broker):
+                cascade_orca_entry.main()
+                launch_broker.assert_called_once_with(
+                    sys.executable, ['codex-container', *plan['argv'][1:]],
+                    {**os.environ, 'TEAM_RUNNER_CASCADE_HOST_PYTHON': sys.executable},
+                )
+
     def test_unsupported_profile_is_rejected_before_orca(self):
         context = SimpleNamespace(repo=self.checkout, profile=profile({}), config_root=self.checkout,
                                   settings_dir=self.checkout, role_layers=())

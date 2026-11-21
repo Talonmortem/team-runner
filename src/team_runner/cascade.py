@@ -17,9 +17,13 @@ ROLES = ('implementer', 'tester', 'reviewer')
 MANAGER_INSTRUCTION = (
     'After Orca wakes this session or you return to it, first run '
     'team-runner cascade resume --execution {execution}. Inspect the frozen step card '
-    'and the evidence before calling cascade accept. Answer a forwarded question once '
-    'with cascade reply and the answer file. Once ready work starts, end the turn '
-    'and wait for Orca.'
+    'and the evidence before calling cascade accept. Accept verified work in the '
+    'scope delegated by the project. Record reversible prototype choices in the '
+    "report and continue. Keep this manager session as the owner's point of contact. "
+    'Ask the owner here about decisions reserved by the project, with the options, '
+    'consequences and recommended choice. Relay answers to workers through cascade '
+    'reply and report the outcome here. Respect all explicit approval gates in the '
+    'frozen materials. Once ready work starts, end the turn and wait for Orca.'
 )
 
 

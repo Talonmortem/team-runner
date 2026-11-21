@@ -27,7 +27,8 @@ def main():
     if 'image' in (plan.get('guard') or {}):
         # The foreground launcher is outside Docker. The guarded binary and
         # its commands are attested separately inside Docker before dispatch.
-        os.execv(argv[0], ['codex-container', *argv[1:]])
+        os.execve(argv[0], ['codex-container', *argv[1:]],
+                  {**os.environ, 'TEAM_RUNNER_CASCADE_HOST_PYTHON': argv[0]})
     os.execvpe(argv[0], argv, os.environ)
 
 

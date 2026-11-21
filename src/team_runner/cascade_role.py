@@ -174,7 +174,10 @@ def _termination(signum, _frame):
 def main():
     execution, feature, separator, *argv = sys.argv[1:]
     if separator == '--container' and not sys.executable:
-        sys.executable = os.readlink('/proc/self/exe')
+        python = Path(os.environ.pop('TEAM_RUNNER_CASCADE_HOST_PYTHON', ''))
+        if not python.is_absolute() or not python.samefile('/proc/self/exe'):
+            raise ValueError('verifier broker requires the original Runner Python path')
+        sys.executable = str(python)
     for signum in (signal.SIGHUP, signal.SIGTERM):
         signal.signal(signum, _termination)
     if separator == '--container' and len(argv) == 1:

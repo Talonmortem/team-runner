@@ -1,0 +1,83 @@
+{
+  "objective": "Подтверждать исчезновение точного runner-терминала после восстановления связи с Orca.",
+  "status": "completed",
+  "invariants": [
+    "Повторная сверка обращается к Orca только для чтения.",
+    "Доказательство привязано к workspace, nonce и исходной квитанции создания.",
+    "Очереди, гейты и неизвестные исходы отправленных операций сохраняют прежнюю семантику."
+  ],
+  "queue": [
+    {
+      "id": "observe",
+      "task": "Зафиксировать оба сценария тестами и добавить повторную сверку в существующий цикл сервиса.",
+      "status": "completed",
+      "depends_on": [],
+      "acceptance": {
+        "condition": "Только полный локальный список и подтверждённый выход точного процесса дают доказательство. Сверка работает при ожидающем гейте."
+      },
+      "verification": {
+        "status": "completed",
+        "checks": [
+          "Тесты восстановления Orca, повторного появления терминала, границ инвентаря и живого процесса."
+        ],
+        "evidence": [
+          "test_runner_terminal_reconciliation: восстановление связи при ожидающем гейте, видимый терминал, неполный список и живой или чужой процесс."
+        ]
+      }
+    },
+    {
+      "id": "persist",
+      "task": "Сохранить наблюдение в журнале и восстановить проекцию startup для того же nonce.",
+      "status": "completed",
+      "depends_on": [
+        "observe"
+      ],
+      "acceptance": {
+        "condition": "Проекция восстанавливается из журнала после прерывания. Смена nonce и неизвестная close-операция сохраняют существующие ограничения."
+      },
+      "verification": {
+        "status": "completed",
+        "checks": [
+          "Тесты startup, смены nonce, повторной сверки, неизвестного close и goal_scope."
+        ],
+        "evidence": [
+          "test_runner_terminal_reconciliation: восстановление из журнала, смена nonce, сохранение квитанции и блокировка смены очереди при неизвестном close.",
+          "test_goal_controller: переход в idle сохраняет подтверждение для текущего nonce."
+        ]
+      }
+    },
+    {
+      "id": "verify",
+      "task": "Проверить совместимость существующих путей выхода, восстановления и смены очереди.",
+      "status": "completed",
+      "depends_on": [
+        "persist"
+      ],
+      "acceptance": {
+        "condition": "Целевые тесты и полный набор проходят. Изолированные сценарии подтверждают отсутствие повторной команды закрытия."
+      },
+      "verification": {
+        "status": "completed",
+        "checks": [
+          "PYTHONPATH=src:tests python3 -m unittest test_runner_terminal_reconciliation test_terminal_retirement test_missing_terminal test_mailbox_recovery test_goal_scope test_goal_controller test_recovery test_runner_startup_identity",
+          "PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'",
+          "git diff --check"
+        ],
+        "evidence": [
+          "Целевой прогон: 108 тестов прошли.",
+          "Полный unittest discover с доступом к loopback для изолированных HTTP-фикстур: 828 тестов прошли.",
+          "git diff --check и три standalone-проверки helper-скриптов прошли."
+        ]
+      }
+    }
+  ],
+  "verification": {
+    "status": "completed",
+    "checks": [
+      "Сверить результаты с критериями приёмки в runner-terminal-reconciliation.md."
+    ],
+    "evidence": [
+      "На изолированных фикстурах положительное доказательство сохраняется при отсутствии терминала, появившийся терминал остаётся неподтверждённым, неизвестное закрытие блокирует смену очереди."
+    ]
+  }
+}

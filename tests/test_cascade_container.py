@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 import socket
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -25,6 +27,28 @@ class ContainerVerifierTests(unittest.TestCase):
         self.candidate = {'checkout': str(self.checkout), 'git_dirs': [str(self.git)], 'extra': {},
                           'manifest': str(self.authority / 'candidate-manifest.json'), 'digest': 'digest'}
         self.image = 'sha256:' + 'a' * 64
+
+    def test_broker_keeps_verification_environment_of_venv_with_aliased_argv(self):
+        venv = self.checkout.parent / 'runner-venv'
+        subprocess.run([sys.executable, '-m', 'venv', '--without-pip', str(venv)], check=True)
+        python = str(venv / 'bin/python')
+        code = """
+import os
+import sys
+from unittest.mock import patch
+from team_runner import cascade_role, verification
+if not sys.executable:
+    sys.argv = ['cascade_role', 'execution', 'feature', '--container', '{}']
+    with patch.object(cascade_role, '_container', return_value=0):
+        cascade_role.main()
+print(verification.digest(verification.execution_environment({})))
+assert sys.executable == os.environ['EXPECTED_PYTHON']
+"""
+        env = {**os.environ, 'PYTHONPATH': str(Path(cascade_role.__file__).resolve().parents[1]),
+               'TEAM_RUNNER_CASCADE_HOST_PYTHON': python, 'EXPECTED_PYTHON': python}
+        baseline = subprocess.check_output([python, '-c', code], env=env, timeout=15)
+        broker = subprocess.check_output(['codex-container', '-c', code], executable=python, env=env, timeout=15)
+        self.assertEqual(broker, baseline)
 
     def guard(self):
         with (patch.object(cascade_container.os, 'geteuid', return_value=1000),
